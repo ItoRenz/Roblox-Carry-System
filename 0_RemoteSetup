@@ -1,0 +1,65 @@
+-- Author: ItoRenz00
+-- Description: RemoteEvent Setup (RUN THIS FIRST!)
+-- Version: 1.1
+-- IMPORTANT: This should load BEFORE other scripts!
+
+--[[
+INSTALLATION:
+1. Create a Script (NOT ModuleScript) in ServerScriptService
+2. Name it "0_RemoteSetup" (0_ makes it load first)
+3. Paste this code
+4. Done!
+]]
+
+-- Services
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Configuration
+local REMOTES = {
+"CarryRemote",
+"Sync", 
+"Unsync"
+}
+
+local USE_FOLDER = false -- Set true to organize in folder
+local FOLDER_NAME = "CarrySystemRemotes"
+
+-- Create folder if needed
+local parent = ReplicatedStorage
+if USE_FOLDER then
+    local folder = ReplicatedStorage:FindFirstChild(FOLDER_NAME)
+    if not folder then
+        folder = Instance.new("Folder")
+        folder.Name = FOLDER_NAME
+        folder.Parent = ReplicatedStorage
+        print("[RemoteSetup] Created folder:", FOLDER_NAME)
+    end
+    parent = folder
+end
+
+-- Create all RemoteEvents
+print("[RemoteSetup] Creating RemoteEvents...")
+
+for _, remoteName in ipairs(REMOTES) do
+    local remote = parent:FindFirstChild(remoteName)
+    
+    if remote then
+        if remote:IsA("RemoteEvent") then
+            print("[RemoteSetup] ✓", remoteName, "already exists")
+        else
+            warn("[RemoteSetup] ✗", remoteName, "exists but is not a RemoteEvent!")
+            remote:Destroy()
+            remote = nil
+        end
+    end
+    
+    if not remote then
+        remote = Instance.new("RemoteEvent")
+        remote.Name = remoteName
+        remote.Parent = parent
+        print("[RemoteSetup] ✓ Created:", remoteName)
+    end
+end
+
+print("[RemoteSetup] All RemoteEvents ready!")
+print("[RemoteSetup] Author: ItoRenz00")
