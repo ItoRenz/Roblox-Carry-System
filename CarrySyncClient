@@ -1,0 +1,1368 @@
+-- ============================================================================
+-- CARRY SYSTEM CLIENT v1.0
+-- Author: ItoRenz00
+-- Description: Interactive player carrying system with modern UI
+-- ============================================================================
+
+-- ============================================================================
+-- SERVICES
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+-- ============================================================================
+-- REFERENCES
+-- ============================================================================
+
+local CarryRemote = ReplicatedStorage:WaitForChild("CarryRemote")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- ============================================================================
+-- CONFIGURATION
+-- ============================================================================
+
+local CONFIG = {
+	DEBUG_MODE = false,
+	WAIT_TIMER_DURATION = 8,
+	CLICK_COOLDOWN = 0.3,
+	TOAST_DURATION = 2,
+	PLAYER_DISTANCE_THRESHOLD = 100,
+	MAX_INTERACT_DISTANCE = 10  -- Maximum distance in studs to interact with players
+}
+
+local ANIMATION_IDS = {
+	SIT_R15 = 86456460001706,
+	SIT_R6 = 92641970583807,
+	CARRY_R15 = 103977242672051,
+	CARRY_R6 = 127460005242268
+}
+
+local COLORS = {
+	Background = Color3.fromRGB(20, 25, 35),
+	BackgroundLight = Color3.fromRGB(35, 40, 50),
+	Primary = Color3.fromRGB(99, 179, 237),
+	PrimaryGlow = Color3.fromRGB(139, 199, 247),
+	Success = Color3.fromRGB(72, 187, 120),
+	SuccessGlow = Color3.fromRGB(104, 211, 145),
+	Danger = Color3.fromRGB(239, 68, 68),
+	DangerGlow = Color3.fromRGB(248, 113, 113),
+	Warning = Color3.fromRGB(245, 158, 11),
+	WarningGlow = Color3.fromRGB(251, 191, 36),
+	Neutral = Color3.fromRGB(100, 116, 139),
+	NeutralGlow = Color3.fromRGB(148, 163, 184),
+	Text = Color3.fromRGB(255, 255, 255),
+	TextDim = Color3.fromRGB(156, 163, 175),
+	Border = Color3.fromRGB(255, 255, 255)
+}
+
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ============================================================================
+-- UTILITIES
+-- ============================================================================
+
+local function debugPrint(...)
+	-- Debug disabled
+end
+
+local function getHeadshotUrl(userId)
+	return string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", userId)
+end
+
+local function getHumanoid()
+	return player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getAnimator(humanoid)
+	return humanoid and (humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid))
+end
+
+local function isR15Rig(humanoid)
+	return humanoid and humanoid.RigType == Enum.HumanoidRigType.R15
+end
+
+local function isPlayerCarried(targetPlayer)
+	local char = targetPlayer.Character
+	if not char then return false end
+	
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	return hrp and hrp:FindFirstChild("CarryWeld") ~= nil
+end
+
+-- ============================================================================
+-- UI SYSTEM
+-- ============================================================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "CarrySystemUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = playerGui
+
+-- UI Creation Helpers
+local UIHelpers = {}
+
+function UIHelpers.createFrame(parent, name, size, pos, color)
+	local container = Instance.new("Frame")
+	container.Name = name .. "Container"
+	container.Size = size
+	container.Position = pos
+	container.BackgroundTransparency = 1
+	container.BorderSizePixel = 0
+	container.Parent = parent
+	
+	local frame = Instance.new("Frame")
+	frame.Name = name
+	frame.Size = UDim2.new(1, 0, 1, 0)
+	frame.BackgroundColor3 = color or COLORS.Background
+	frame.BackgroundTransparency = 0.2
+	frame.BorderSizePixel = 0
+	frame.ZIndex = 2
+	frame.Parent = container
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 10)
+	corner.Parent = frame
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = COLORS.Border
+	stroke.Thickness = 1
+	stroke.Transparency = 0.7
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = frame
+	
+	return container, frame
+end
+
+function UIHelpers.createButton(parent, name, size, pos, text, color, glowColor)
+	local container = Instance.new("Frame")
+	container.Name = name .. "Container"
+	container.Size = size
+	container.Position = pos
+	container.BackgroundTransparency = 1
+	container.BorderSizePixel = 0
+	container.Parent = parent
+	
+	-- Glow effect
+	local glow = Instance.new("Frame")
+	glow.Name = "Glow"
+	glow.Size = UDim2.new(1, 6, 1, 6)
+	glow.Position = UDim2.new(0.5, 0, 0.5, 0)
+	glow.AnchorPoint = Vector2.new(0.5, 0.5)
+	glow.BackgroundColor3 = glowColor or color
+	glow.BackgroundTransparency = 1
+	glow.BorderSizePixel = 0
+	glow.ZIndex = 1
+	glow.Parent = container
+	
+	local glowCorner = Instance.new("UICorner")
+	glowCorner.CornerRadius = UDim.new(0, 8)
+	glowCorner.Parent = glow
+	
+	-- Button
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.Size = UDim2.new(1, 0, 1, 0)
+	button.BackgroundColor3 = color
+	button.BackgroundTransparency = 0.25
+	button.Text = text
+	button.TextColor3 = COLORS.Text
+	button.Font = Enum.Font.GothamBold
+	button.TextSize = isMobile and 12 or 14
+	button.BorderSizePixel = 0
+	button.AutoButtonColor = false
+	button.ZIndex = 2
+	button.Parent = container
+	
+	local btnCorner = Instance.new("UICorner")
+	btnCorner.CornerRadius = UDim.new(0, 8)
+	btnCorner.Parent = button
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 255, 255)
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.4
+	stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	stroke.Parent = button
+	
+	local textStroke = Instance.new("UIStroke")
+	textStroke.Color = Color3.fromRGB(0, 0, 0)
+	textStroke.Thickness = 2
+	textStroke.Transparency = 0.5
+	textStroke.Parent = button
+	
+	-- Hover effects
+	button.MouseEnter:Connect(function()
+		local brighterColor = Color3.fromRGB(
+			math.min(255, color.R * 255 * 1.15),
+			math.min(255, color.G * 255 * 1.15),
+			math.min(255, color.B * 255 * 1.15)
+		)
+		
+		TweenService:Create(button, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {
+			BackgroundTransparency = 0.1,
+			BackgroundColor3 = brighterColor
+		}):Play()
+		
+		TweenService:Create(glow, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+			BackgroundTransparency = 0.65
+		}):Play()
+		
+		TweenService:Create(stroke, TweenInfo.new(0.15), {
+			Transparency = 0.2
+		}):Play()
+	end)
+	
+	button.MouseLeave:Connect(function()
+		TweenService:Create(button, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {
+			BackgroundTransparency = 0.25,
+			BackgroundColor3 = color
+		}):Play()
+		
+		TweenService:Create(glow, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+			BackgroundTransparency = 1
+		}):Play()
+		
+		TweenService:Create(stroke, TweenInfo.new(0.15), {
+			Transparency = 0.4
+		}):Play()
+	end)
+	
+	return container, button
+end
+
+function UIHelpers.createLabel(parent, name, size, pos, text, fontSize)
+	local label = Instance.new("TextLabel")
+	label.Name = name
+	label.Size = size
+	label.Position = pos
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = COLORS.Text
+	label.Font = Enum.Font.GothamMedium
+	label.TextSize = fontSize or (isMobile and 10 or 12)
+	label.TextWrapped = true
+	label.Parent = parent
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(0, 0, 0)
+	stroke.Thickness = 1.5
+	stroke.Transparency = 0.7
+	stroke.Parent = label
+	
+	return label
+end
+
+function UIHelpers.createAvatar(parent, name, size, pos, borderColor)
+	local avatar = Instance.new("ImageLabel")
+	avatar.Name = name
+	avatar.Size = size
+	avatar.Position = pos
+	avatar.BackgroundColor3 = COLORS.BackgroundLight
+	avatar.BackgroundTransparency = 0.3
+	avatar.BorderSizePixel = 0
+	avatar.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
+	avatar.ZIndex = 5
+	avatar.Parent = parent
+	
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = avatar
+	
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = borderColor or COLORS.Primary
+	stroke.Thickness = 2
+	stroke.Transparency = 0.4
+	stroke.Parent = avatar
+	
+	return avatar
+end
+
+function UIHelpers.showFrame(container)
+	container.Visible = true
+	local frame = container:FindFirstChild(container.Name:gsub("Container", ""))
+	if frame then
+		frame.BackgroundTransparency = 1
+		TweenService:Create(frame, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+			BackgroundTransparency = 0.2
+		}):Play()
+	end
+end
+
+function UIHelpers.hideFrame(container, callback)
+	local frame = container:FindFirstChild(container.Name:gsub("Container", ""))
+	if frame then
+		TweenService:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			BackgroundTransparency = 1
+		}):Play()
+	end
+	
+	task.delay(0.2, function()
+		container.Visible = false
+		if callback then callback() end
+	end)
+end
+
+-- ============================================================================
+-- INPUT SYSTEM
+-- ============================================================================
+
+local InputSystem = {}
+InputSystem.lastClickTime = 0
+InputSystem.connections = {}
+
+function InputSystem.isClickOnUI(x, y)
+	for _, obj in ipairs(playerGui:GetGuiObjectsAtPosition(x, y)) do
+		if obj:IsDescendantOf(screenGui) then
+			return true
+		end
+	end
+	return false
+end
+
+function InputSystem.pickPlayerAtPosition(x, y)
+	if InputSystem.isClickOnUI(x, y) then
+		return nil
+	end
+	
+	local camera = workspace.CurrentCamera
+	local unitRay = camera:ViewportPointToRay(x, y)
+	
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = player.Character and {player.Character} or {}
+	raycastParams.IgnoreWater = true
+	
+	local result = workspace:Raycast(unitRay.Origin, unitRay.Direction * 1000, raycastParams)
+	
+	-- Check direct raycast hit
+	if result then
+		local hitModel = result.Instance:FindFirstAncestorOfClass("Model")
+		if hitModel then
+			local humanoid = hitModel:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				local targetPlayer = Players:GetPlayerFromCharacter(hitModel)
+				if targetPlayer and targetPlayer ~= player then
+					if not isPlayerCarried(targetPlayer) then
+						-- Check 3D distance
+						local targetHRP = hitModel:FindFirstChild("HumanoidRootPart")
+						local playerChar = player.Character
+						local playerHRP = playerChar and playerChar:FindFirstChild("HumanoidRootPart")
+						
+						if targetHRP and playerHRP then
+							local distance3D = (targetHRP.Position - playerHRP.Position).Magnitude
+							if distance3D <= CONFIG.MAX_INTERACT_DISTANCE then
+								return targetPlayer
+							else
+								return nil
+							end
+						end
+						return targetPlayer
+					else
+						return nil
+					end
+				end
+			end
+		end
+	end
+	
+	-- Fallback: Find closest player to click position
+	local mousePos = Vector2.new(x, y)
+	local closestPlayer, closestDistance = nil, math.huge
+	local playerChar = player.Character
+	local playerHRP = playerChar and playerChar:FindFirstChild("HumanoidRootPart")
+	
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= player and otherPlayer.Character then
+			local hrp = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+			if hrp and playerHRP then
+				-- Check 3D distance first
+				local distance3D = (hrp.Position - playerHRP.Position).Magnitude
+				if distance3D <= CONFIG.MAX_INTERACT_DISTANCE then
+					local screenPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+					if onScreen then
+						local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+						if distance < CONFIG.PLAYER_DISTANCE_THRESHOLD and distance < closestDistance then
+							if not isPlayerCarried(otherPlayer) then
+								closestDistance = distance
+								closestPlayer = otherPlayer
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	
+	-- Show message if no player found within distance
+	if not closestPlayer and playerHRP then
+		for _, otherPlayer in ipairs(Players:GetPlayers()) do
+			if otherPlayer ~= player and otherPlayer.Character then
+				local hrp = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+				if hrp then
+					local screenPos, onScreen = camera:WorldToViewportPoint(hrp.Position)
+					if onScreen then
+						local distance = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+						if distance < CONFIG.PLAYER_DISTANCE_THRESHOLD then
+							break
+						end
+					end
+				end
+			end
+		end
+	end
+	
+	return closestPlayer
+end
+
+function InputSystem.disconnect()
+	for _, conn in pairs(InputSystem.connections) do
+		if conn then
+			conn:Disconnect()
+		end
+	end
+	InputSystem.connections = {}
+end
+
+function InputSystem.connect(handlePlayerClickCallback)
+	InputSystem.disconnect()
+	
+	InputSystem.connections.mouseInput = UserInputService.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			local mouseLocation = UserInputService:GetMouseLocation()
+			handlePlayerClickCallback(mouseLocation.X, mouseLocation.Y)
+		end
+	end)
+	
+	InputSystem.connections.touchInput = UserInputService.TouchTap:Connect(function(touchPositions)
+		local touchPosition = touchPositions and touchPositions[1]
+		if touchPosition then
+			handlePlayerClickCallback(touchPosition.X, touchPosition.Y)
+		end
+	end)
+end
+
+-- ============================================================================
+-- ANIMATION SYSTEM
+-- ============================================================================
+
+local AnimationSystem = {}
+AnimationSystem.tracks = {sit = nil, carry = nil}
+
+function AnimationSystem.playSitAnimation()
+	local humanoid = getHumanoid()
+	if not humanoid then return end
+	
+	humanoid.Sit = true
+	
+	local animId = isR15Rig(humanoid) and ANIMATION_IDS.SIT_R15 or ANIMATION_IDS.SIT_R6
+	if animId == 0 then return end
+	
+	local animator = getAnimator(humanoid)
+	if AnimationSystem.tracks.sit then
+		pcall(function()
+			AnimationSystem.tracks.sit:Stop(0.15)
+		end)
+	end
+	
+	-- Wrap in task.spawn to isolate errors
+	task.spawn(function()
+		local animation = Instance.new("Animation")
+		animation.AnimationId = "rbxassetid://" .. animId
+		
+		local success, track = pcall(function()
+			return animator:LoadAnimation(animation)
+		end)
+		
+		if success and track then
+			AnimationSystem.tracks.sit = track
+			track.Priority = Enum.AnimationPriority.Action
+			track.Looped = true
+			pcall(function()
+				track:Play(0.2)
+			end)
+		end
+	end)
+end
+
+function AnimationSystem.stopSitAnimation()
+	if AnimationSystem.tracks.sit then
+		pcall(function()
+			AnimationSystem.tracks.sit:Stop(0.2)
+		end)
+		AnimationSystem.tracks.sit = nil
+	end
+	
+	local humanoid = getHumanoid()
+	if humanoid then
+		humanoid.Sit = false
+	end
+end
+
+function AnimationSystem.playCarryAnimation()
+	local humanoid = getHumanoid()
+	if not humanoid then return end
+	
+	local animId = isR15Rig(humanoid) and ANIMATION_IDS.CARRY_R15 or ANIMATION_IDS.CARRY_R6
+	if animId == 0 then return end
+	
+	local animator = getAnimator(humanoid)
+	if AnimationSystem.tracks.carry then
+		pcall(function()
+			AnimationSystem.tracks.carry:Stop(0.1)
+		end)
+	end
+	
+	-- Wrap in task.spawn to isolate errors
+	task.spawn(function()
+		local animation = Instance.new("Animation")
+		animation.AnimationId = "rbxassetid://" .. animId
+		
+		local success, track = pcall(function()
+			return animator:LoadAnimation(animation)
+		end)
+		
+		if success and track then
+			AnimationSystem.tracks.carry = track
+			track.Priority = Enum.AnimationPriority.Action
+			track.Looped = true
+			pcall(function()
+				track:Play(0.2)
+			end)
+		end
+	end)
+end
+
+function AnimationSystem.stopCarryAnimation()
+	if AnimationSystem.tracks.carry then
+		pcall(function()
+			AnimationSystem.tracks.carry:Stop(0.2)
+		end)
+		AnimationSystem.tracks.carry = nil
+	end
+end
+
+-- ============================================================================
+-- JUMP BLOCKING
+-- ============================================================================
+
+local JumpBlocker = {}
+JumpBlocker.connection = nil
+
+function JumpBlocker.start()
+	if JumpBlocker.connection then
+		JumpBlocker.connection:Disconnect()
+	end
+	
+	JumpBlocker.connection = UserInputService.JumpRequest:Connect(function()
+		local humanoid = getHumanoid()
+		if humanoid then
+			humanoid.Jump = false
+		end
+	end)
+end
+
+function JumpBlocker.stop()
+	if JumpBlocker.connection then
+		JumpBlocker.connection:Disconnect()
+		JumpBlocker.connection = nil
+	end
+end
+
+-- ============================================================================
+-- STATE MANAGEMENT
+-- ============================================================================
+
+local State = {
+	mode = "idle",
+	selectedTargetId = nil,
+	selectedTargetName = nil,
+	lastRequesterId = nil,
+	waitingForApproval = false,
+	waitToken = 0,
+	isCarried = false,
+	currentCarrierId = nil,
+	currentCarrierName = nil,
+	carriedList = {},
+	carriedIndex = 1,
+	currentOtherId = nil,
+	isSynced = false,
+	syncedPlayerId = nil,
+	systemReady = false
+}
+
+-- ============================================================================
+-- UI COMPONENTS
+-- ============================================================================
+
+local UI = {}
+
+-- Main Selection Panel
+local mainSize = isMobile and UDim2.new(0, 220, 0, 105) or UDim2.new(0, 240, 0, 115)
+UI.mainContainer, UI.mainFrame = UIHelpers.createFrame(screenGui, "MainFrame", mainSize, UDim2.new(0.5, 0, 0.5, 0), COLORS.Background)
+UI.mainContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+UI.mainContainer.Visible = false
+
+-- Close button
+UI.btnCloseContainer, UI.btnClose = UIHelpers.createButton(UI.mainFrame, "CloseButton", UDim2.new(0, 24, 0, 24), UDim2.new(1, -28, 0, 4), "X", COLORS.Danger, COLORS.DangerGlow)
+UI.btnClose.TextSize = 18
+
+-- Avatar
+local avatarSize = isMobile and 40 or 46
+UI.imgAvatar = UIHelpers.createAvatar(UI.mainFrame, "Avatar", UDim2.new(0, avatarSize, 0, avatarSize), UDim2.new(0, 8, 0, 8), COLORS.Primary)
+
+-- Name label
+UI.lblName = UIHelpers.createLabel(UI.mainFrame, "NameLabel", UDim2.new(1, -avatarSize - 20, 0, 18), UDim2.new(0, avatarSize + 12, 0, 8), "Select Player", isMobile and 13 or 14)
+UI.lblName.TextXAlignment = Enum.TextXAlignment.Left
+UI.lblName.Font = Enum.Font.GothamBold
+
+-- Info label
+UI.lblInfo = UIHelpers.createLabel(UI.mainFrame, "InfoLabel", UDim2.new(1, -avatarSize - 20, 0, 14), UDim2.new(0, avatarSize + 12, 0, 28), "", isMobile and 10 or 11)
+UI.lblInfo.TextXAlignment = Enum.TextXAlignment.Left
+UI.lblInfo.TextColor3 = COLORS.TextDim
+UI.lblInfo.Visible = false
+
+-- Button container
+UI.btnContainer = Instance.new("Frame")
+UI.btnContainer.Name = "Buttons"
+UI.btnContainer.Size = UDim2.new(1, -16, 0, 50)
+UI.btnContainer.Position = UDim2.new(0, 8, 0, avatarSize + 14)
+UI.btnContainer.BackgroundTransparency = 1
+UI.btnContainer.Parent = UI.mainFrame
+
+-- Carry button
+local btnCarrySize = isMobile and UDim2.new(1, 0, 0, 22) or UDim2.new(1, 0, 0, 26)
+UI.btnCarryContainer, UI.btnCarry = UIHelpers.createButton(UI.btnContainer, "CarryBtn", btnCarrySize, UDim2.new(0, 0, 0, 0), "Carry", COLORS.Primary, COLORS.PrimaryGlow)
+if isMobile then UI.btnCarry.TextSize = 11 end
+
+-- Sync button
+local btnSyncSize = isMobile and UDim2.new(0.48, 0, 0, 20) or UDim2.new(0.48, 0, 0, 24)
+local btnSyncPos = isMobile and UDim2.new(0, 0, 0, 26) or UDim2.new(0, 0, 0, 30)
+UI.btnSyncContainer, UI.btnSync = UIHelpers.createButton(UI.btnContainer, "SyncBtn", btnSyncSize, btnSyncPos, "Sync", COLORS.Neutral, COLORS.NeutralGlow)
+UI.btnSyncContainer.Visible = false
+if isMobile then UI.btnSync.TextSize = 10 end
+
+-- Add Friend button
+local btnAddFriendSize = isMobile and UDim2.new(0.48, 0, 0, 20) or UDim2.new(0.48, 0, 0, 24)
+local btnAddFriendPos = isMobile and UDim2.new(0.52, 0, 0, 26) or UDim2.new(0.52, 0, 0, 30)
+UI.btnAddFriendContainer, UI.btnAddFriend = UIHelpers.createButton(UI.btnContainer, "AddBtn", btnAddFriendSize, btnAddFriendPos, "Add Friend", COLORS.Neutral, COLORS.NeutralGlow)
+if isMobile then UI.btnAddFriend.TextSize = 10 end
+
+-- Get Down Panel
+local getDownSize = isMobile and UDim2.new(0, 100, 0, 46) or UDim2.new(0, 118, 0, 52)
+UI.getDownContainer, UI.getDownFrame = UIHelpers.createFrame(screenGui, "GetDownPanel", getDownSize, isMobile and UDim2.new(1, -50, 0, -20) or UDim2.new(1, -50, 0, -20), COLORS.Background)
+UI.getDownContainer.AnchorPoint = Vector2.new(1, 0)
+UI.getDownContainer.Visible = false
+
+UI.lblCarrier = UIHelpers.createLabel(UI.getDownFrame, "CarrierLabel", UDim2.new(1, -8, 0, 14), UDim2.new(0, 4, 0, 3), "Carried by:", isMobile and 9 or 10)
+UI.lblCarrier.TextXAlignment = Enum.TextXAlignment.Left
+UI.lblCarrier.TextColor3 = COLORS.TextDim
+
+local getDownBtnSize = isMobile and UDim2.new(1, -8, 0, 20) or UDim2.new(1, -8, 0, 22)
+UI.btnGetDownContainer, UI.btnGetDown = UIHelpers.createButton(UI.getDownFrame, "GetDownBtn", getDownBtnSize, isMobile and UDim2.new(0, 4, 1, -23) or UDim2.new(0, 4, 1, -25), "Get Down", COLORS.Danger, COLORS.DangerGlow)
+if isMobile then UI.btnGetDown.TextSize = 8 end
+
+-- Accept/Decline Panel
+local acceptDeclineSize = isMobile and UDim2.new(0, 180, 0, 100) or UDim2.new(0, 200, 0, 105)
+UI.acceptDeclineContainer, UI.acceptDeclineFrame = UIHelpers.createFrame(screenGui, "AcceptDeclinePanel", acceptDeclineSize, UDim2.new(0.5, 0, 0.5, 0), COLORS.Background)
+UI.acceptDeclineContainer.AnchorPoint = Vector2.new(0.5, 0.5)
+UI.acceptDeclineContainer.Visible = false
+
+UI.lblRequestTitle = UIHelpers.createLabel(UI.acceptDeclineFrame, "RequestTitle", UDim2.new(1, -16, 0, 16), UDim2.new(0, 8, 0, 5), "Carry Request", isMobile and 12 or 13)
+UI.lblRequestTitle.TextXAlignment = Enum.TextXAlignment.Center
+UI.lblRequestTitle.Font = Enum.Font.GothamBold
+
+UI.requestAvatar = UIHelpers.createAvatar(UI.acceptDeclineFrame, "RequestAvatar", UDim2.new(0, 28, 0, 28), UDim2.new(0.5, 0, 0, 25), COLORS.Primary)
+UI.requestAvatar.AnchorPoint = Vector2.new(0.5, 0)
+
+UI.lblRequestFrom = UIHelpers.createLabel(UI.acceptDeclineFrame, "RequestFrom", UDim2.new(1, -16, 0, 14), UDim2.new(0, 8, 0, 56), "Player wants to carry you", isMobile and 9 or 10)
+UI.lblRequestFrom.TextXAlignment = Enum.TextXAlignment.Center
+UI.lblRequestFrom.TextColor3 = COLORS.TextDim
+
+local btnAcceptSize = isMobile and UDim2.new(0, 75, 0, 22) or UDim2.new(0, 85, 0, 24)
+UI.btnAcceptContainer, UI.btnAccept = UIHelpers.createButton(UI.acceptDeclineFrame, "AcceptBtn", btnAcceptSize, isMobile and UDim2.new(0.5, -79, 1, -26) or UDim2.new(0.5, -89, 1, -28), "Accept", COLORS.Success, COLORS.SuccessGlow)
+UI.btnAccept.TextSize = isMobile and 10 or 12
+
+local btnDeclineSize = isMobile and UDim2.new(0, 75, 0, 22) or UDim2.new(0, 85, 0, 24)
+UI.btnDeclineContainer, UI.btnDecline = UIHelpers.createButton(UI.acceptDeclineFrame, "DeclineBtn", btnDeclineSize, isMobile and UDim2.new(0.5, 4, 1, -26) or UDim2.new(0.5, 4, 1, -28), "Decline", COLORS.Danger, COLORS.DangerGlow)
+UI.btnDecline.TextSize = isMobile and 10 or 12
+
+-- Unsync Panel
+local unsyncSize = isMobile and UDim2.new(0, 100, 0, 46) or UDim2.new(0, 118, 0, 52)
+UI.unsyncContainer, UI.unsyncFrame = UIHelpers.createFrame(screenGui, "UnsyncPanel", unsyncSize, isMobile and UDim2.new(1, -50, 0, 50) or UDim2.new(1, -50, 0, 55), COLORS.Background)
+UI.unsyncContainer.AnchorPoint = Vector2.new(1, 0)
+UI.unsyncContainer.Visible = false
+
+UI.lblUnsync = UIHelpers.createLabel(UI.unsyncFrame, "UnsyncLabel", UDim2.new(1, -8, 0, 14), UDim2.new(0, 4, 0, 3), "Sync Active", isMobile and 9 or 10)
+UI.lblUnsync.TextXAlignment = Enum.TextXAlignment.Center
+UI.lblUnsync.TextColor3 = COLORS.TextDim
+UI.lblUnsync.Font = Enum.Font.GothamBold
+
+local btnUnsyncSize = isMobile and UDim2.new(1, -8, 0, 20) or UDim2.new(1, -8, 0, 22)
+UI.btnUnsyncContainer, UI.btnUnsync = UIHelpers.createButton(UI.unsyncFrame, "UnsyncBtn", btnUnsyncSize, isMobile and UDim2.new(0, 4, 1, -23) or UDim2.new(0, 4, 1, -25), "Unsync", COLORS.Warning, COLORS.WarningGlow)
+UI.btnUnsync.TextSize = isMobile and 10 or 12
+
+-- Carrier Panel
+local carrierSize = isMobile and UDim2.new(0, 119, 0, 66) or UDim2.new(0, 126, 0, 70)
+UI.carrierContainer, UI.carrierFrame = UIHelpers.createFrame(screenGui, "CarrierPanel", carrierSize, isMobile and UDim2.new(1, -50, 0, -20) or UDim2.new(1, -50, 0, -20), COLORS.Background)
+UI.carrierContainer.AnchorPoint = Vector2.new(1, 0)
+UI.carrierContainer.Visible = false
+
+local cAvatarSize = isMobile and 34 or 38
+UI.cAvatar = UIHelpers.createAvatar(UI.carrierFrame, "Avatar", UDim2.new(0, cAvatarSize, 0, cAvatarSize), UDim2.new(0, 5, 0, 5), COLORS.Success)
+
+local countLabelX = isMobile and (cAvatarSize + 9) or (cAvatarSize + 8)
+local countLabelY = isMobile and 7 or 8
+UI.lblCarrierCount = UIHelpers.createLabel(UI.carrierFrame, "CarrierCount", UDim2.new(1, -cAvatarSize - 14, 0, 14), UDim2.new(0, countLabelX, 0, countLabelY), "1/1", 10)
+UI.lblCarrierCount.TextXAlignment = Enum.TextXAlignment.Left
+UI.lblCarrierCount.TextYAlignment = Enum.TextYAlignment.Top
+UI.lblCarrierCount.Font = Enum.Font.GothamMedium
+UI.lblCarrierCount.TextScaled = false
+
+local nameLabelY = isMobile and 20 or 22
+UI.lblCarrierName = UIHelpers.createLabel(UI.carrierFrame, "CarrierName", UDim2.new(1, -cAvatarSize - 14, 0, 14), UDim2.new(0, countLabelX, 0, nameLabelY), "PlayerName", isMobile and 11 or 12)
+UI.lblCarrierName.TextXAlignment = Enum.TextXAlignment.Left
+UI.lblCarrierName.TextYAlignment = Enum.TextYAlignment.Top
+UI.lblCarrierName.Font = Enum.Font.GothamBold
+UI.lblCarrierName.TextScaled = false
+UI.lblCarrierName.TextColor3 = COLORS.TextDim
+
+local navIconSize = isMobile and 18 or 20
+local navButtonY = isMobile and 46 or 50
+local panelWidth = isMobile and 119 or 126
+
+UI.btnLeftContainer, UI.btnLeft = UIHelpers.createButton(UI.carrierFrame, "LeftBtn", UDim2.new(0, navIconSize, 0, navIconSize), UDim2.new(0, 5, 0, navButtonY), "◄", COLORS.Neutral, COLORS.NeutralGlow)
+UI.btnLeft.TextSize = isMobile and 13 or 15
+
+local navRightX = panelWidth - navIconSize - 5
+UI.btnRightContainer, UI.btnRight = UIHelpers.createButton(UI.carrierFrame, "RightBtn", UDim2.new(0, navIconSize, 0, navIconSize), UDim2.new(0, navRightX, 0, navButtonY), "►", COLORS.Neutral, COLORS.NeutralGlow)
+UI.btnRight.TextSize = isMobile and 13 or 15
+
+local dropButtonWidth = isMobile and 56 or 60
+local dropButtonX = 5 + navIconSize + ((navRightX - (5 + navIconSize)) - dropButtonWidth) / 2
+UI.btnDropContainer, UI.btnDrop = UIHelpers.createButton(UI.carrierFrame, "DropBtn", UDim2.new(0, dropButtonWidth, 0, navIconSize), UDim2.new(0, dropButtonX, 0, navButtonY), "Drop", COLORS.Danger, COLORS.DangerGlow)
+UI.btnDrop.TextSize = isMobile and 8 or 9
+
+-- ============================================================================
+-- FRIEND SYSTEM
+-- ============================================================================
+
+local FriendSystem = {}
+
+function FriendSystem.updateAddFriendButton(userId)
+	State.currentOtherId = userId
+	UI.btnAddFriendContainer.Visible = true
+	
+	if not userId or userId == player.UserId then
+		UI.btnAddFriend.Text = "You"
+		UI.btnAddFriend.BackgroundColor3 = COLORS.Neutral
+		return
+	end
+	
+	local success, isFriend = pcall(function()
+		return player:IsFriendsWith(userId)
+	end)
+	
+	if success and isFriend then
+		UI.btnAddFriend.Text = "✓ Friend"
+		UI.btnAddFriend.BackgroundColor3 = COLORS.Success
+		return
+	end
+	
+	local targetPlayer = Players:GetPlayerByUserId(userId)
+	if targetPlayer then
+		local statusSuccess, status = pcall(function()
+			return player:GetFriendStatus(targetPlayer)
+		end)
+		
+		if statusSuccess then
+			if status == Enum.FriendStatus.Friend then
+				UI.btnAddFriend.Text = "✓ Friend"
+				UI.btnAddFriend.BackgroundColor3 = COLORS.Success
+				return
+			elseif status == Enum.FriendStatus.FriendRequestSent then
+				UI.btnAddFriend.Text = "Pending..."
+				UI.btnAddFriend.BackgroundColor3 = COLORS.Warning
+				return
+			elseif status == Enum.FriendStatus.FriendRequestReceived then
+				UI.btnAddFriend.Text = "Accept"
+				UI.btnAddFriend.BackgroundColor3 = COLORS.Primary
+				return
+			end
+		end
+	end
+	
+	UI.btnAddFriend.Text = "Add Friend"
+	UI.btnAddFriend.BackgroundColor3 = COLORS.Neutral
+end
+
+function FriendSystem.requestFriendship(userId)
+	if not userId or userId == player.UserId then return end
+	
+	local targetPlayer = Players:GetPlayerByUserId(userId)
+	if not targetPlayer then return end
+	
+	local currentText = UI.btnAddFriend.Text
+	
+	if currentText == "✓ Friend" then
+		return
+	end
+	
+	if currentText == "Pending..." then
+		return
+	end
+	
+	if currentText == "You" then
+		return
+	end
+	
+	-- Open player profile using StarterGui
+	local StarterGui = game:GetService("StarterGui")
+	local success, err = pcall(function()
+		StarterGui:SetCore("PromptSendFriendRequest", targetPlayer)
+	end)
+	
+	if not success then
+		-- Fallback: Try alternate method
+		pcall(function()
+			player:PromptFriendRequest(targetPlayer)
+		end)
+	end
+	
+	-- Update button status after a delay
+	task.delay(0.5, function()
+		FriendSystem.updateAddFriendButton(userId)
+	end)
+end
+
+-- Auto-refresh friend status
+task.spawn(function()
+	while true do
+		task.wait(3)
+		if UI.mainContainer.Visible and State.currentOtherId and State.mode == "select" then
+			FriendSystem.updateAddFriendButton(State.currentOtherId)
+		end
+	end
+end)
+
+-- ============================================================================
+-- UI MODE MANAGEMENT
+-- ============================================================================
+
+local UIManager = {}
+
+function UIManager.resetMainFrame()
+	State.mode = "idle"
+	State.selectedTargetId = nil
+	State.selectedTargetName = nil
+	State.lastRequesterId = nil
+	State.currentOtherId = nil
+	State.waitingForApproval = false
+	
+	UI.btnSyncContainer.Visible = false
+	UIHelpers.hideFrame(UI.mainContainer)
+	UIHelpers.hideFrame(UI.acceptDeclineContainer)
+	
+	if not State.isSynced then
+		UIHelpers.hideFrame(UI.unsyncContainer)
+	end
+end
+
+function UIManager.setModeSelect(targetPlayer)
+	State.mode = "select"
+	State.selectedTargetId = targetPlayer.UserId
+	State.selectedTargetName = targetPlayer.DisplayName
+	State.lastRequesterId = nil
+	
+	UI.lblName.Text = targetPlayer.DisplayName
+	UI.imgAvatar.Image = getHeadshotUrl(targetPlayer.UserId)
+	UI.lblInfo.Visible = false
+	
+	UI.btnCarryContainer.Visible = true
+	UI.btnCarry.Text = "Carry"
+	UI.btnAcceptContainer.Visible = false
+	UI.btnDeclineContainer.Visible = false
+	
+	FriendSystem.updateAddFriendButton(targetPlayer.UserId)
+	UI.btnSyncContainer.Visible = true
+	
+	UIHelpers.showFrame(UI.mainContainer)
+end
+
+function UIManager.setModePrompt(fromId, fromName)
+	UI.mainContainer.Visible = false
+	UI.carrierContainer.Visible = false
+	UI.getDownContainer.Visible = false
+	
+	State.mode = "prompt"
+	State.selectedTargetId = nil
+	State.selectedTargetName = nil
+	State.lastRequesterId = fromId
+	
+	UI.lblRequestFrom.Text = (fromName or "Player") .. " wants to carry you"
+	UI.requestAvatar.Image = getHeadshotUrl(fromId)
+	
+	UI.btnAcceptContainer.Visible = true
+	UI.btnDeclineContainer.Visible = true
+	UI.btnAccept.Visible = true
+	UI.btnDecline.Visible = true
+	
+	UI.acceptDeclineContainer.Visible = true
+	UIHelpers.showFrame(UI.acceptDeclineContainer)
+end
+
+function UIManager.setCarriedMode(carrierName, carrierId)
+	State.currentCarrierId = carrierId
+	State.currentCarrierName = carrierName
+	State.isCarried = true
+	
+	UIManager.resetMainFrame()
+	
+	UI.lblCarrier.Text = "By: " .. carrierName
+	UIHelpers.showFrame(UI.getDownContainer)
+	
+	JumpBlocker.start()
+end
+
+-- ============================================================================
+-- WAIT TIMER
+-- ============================================================================
+
+local WaitTimer = {}
+
+function WaitTimer.stop()
+	State.waitingForApproval = false
+	State.waitToken = State.waitToken + 1
+	
+	if State.mode == "select" and UI.btnCarryContainer.Visible then
+		UI.btnCarry.Text = "Carry"
+	end
+end
+
+function WaitTimer.start()
+	State.waitingForApproval = true
+	local myToken = State.waitToken + 1
+	State.waitToken = myToken
+	
+	UI.btnCarry.Text = "Waiting..."
+	
+	local endTime = os.clock() + CONFIG.WAIT_TIMER_DURATION
+	
+	task.spawn(function()
+		while State.waitingForApproval and State.waitToken == myToken do
+			local timeLeft = math.max(0, math.ceil(endTime - os.clock()))
+			
+			if State.mode == "select" then
+				UI.btnCarry.Text = string.format("Wait %ds", timeLeft)
+			end
+			
+			if timeLeft <= 0 then
+				break
+			end
+			
+			task.wait(0.2)
+		end
+	end)
+end
+
+function WaitTimer.flashMessageAndClose(msg, isError)
+	WaitTimer.stop()
+	
+	if State.mode == "select" and UI.btnCarryContainer.Visible then
+		UI.btnCarry.Text = msg
+		task.delay(1.5, UIManager.resetMainFrame)
+	else
+		UIManager.resetMainFrame()
+	end
+end
+
+-- ============================================================================
+-- CARRIER UI MANAGEMENT
+-- ============================================================================
+
+local CarrierManager = {}
+
+function CarrierManager.refresh()
+	local count = #State.carriedList
+	
+	if count <= 0 then
+		UIHelpers.hideFrame(UI.carrierContainer)
+		AnimationSystem.stopCarryAnimation()
+		return
+	end
+	
+	-- Clamp index
+	if State.carriedIndex < 1 then
+		State.carriedIndex = 1
+	end
+	if State.carriedIndex > count then
+		State.carriedIndex = count
+	end
+	
+	local item = State.carriedList[State.carriedIndex]
+	UI.lblCarrierCount.Text = string.format("%d/%d", State.carriedIndex, count)
+	UI.lblCarrierName.Text = item.name or "?"
+	UI.cAvatar.Image = getHeadshotUrl(item.id)
+	
+	if not State.isCarried then
+		UIHelpers.showFrame(UI.carrierContainer)
+	end
+	
+	if #State.carriedList > 0 and not State.isCarried and not AnimationSystem.tracks.carry then
+		AnimationSystem.playCarryAnimation()
+	end
+end
+
+function CarrierManager.addPlayer(id, name)
+	-- Check if already in list
+	for _, item in ipairs(State.carriedList) do
+		if item.id == id then
+			item.name = name
+			CarrierManager.refresh()
+			return
+		end
+	end
+	
+	table.insert(State.carriedList, {id = id, name = name})
+	State.carriedIndex = #State.carriedList
+	CarrierManager.refresh()
+end
+
+function CarrierManager.removePlayer(id)
+	local removedIndex, removedName = nil, nil
+	
+	for i, item in ipairs(State.carriedList) do
+		if item.id == id then
+			removedIndex = i
+			removedName = item.name
+			break
+		end
+	end
+	
+	if removedIndex then
+		table.remove(State.carriedList, removedIndex)
+	end
+	
+	if State.carriedIndex > #State.carriedList then
+		State.carriedIndex = #State.carriedList
+	end
+	
+	CarrierManager.refresh()
+end
+
+function CarrierManager.setList(list)
+	State.carriedList = {}
+	
+	for _, item in ipairs(list or {}) do
+		table.insert(State.carriedList, {id = item.id, name = item.name})
+	end
+	
+	if State.carriedIndex > #State.carriedList then
+		State.carriedIndex = #State.carriedList
+	end
+	if State.carriedIndex < 1 then
+		State.carriedIndex = 1
+	end
+	
+	CarrierManager.refresh()
+end
+
+-- ============================================================================
+-- INPUT HANDLING
+-- ============================================================================
+
+local function handlePlayerClick(x, y)
+	if not State.systemReady then return end
+	if State.mode == "prompt" then return end
+	if State.waitingForApproval then return end
+	if InputSystem.isClickOnUI(x, y) then return end
+	
+	local currentTime = tick()
+	if currentTime - InputSystem.lastClickTime < CONFIG.CLICK_COOLDOWN then
+		return
+	end
+	InputSystem.lastClickTime = currentTime
+	
+	local targetPlayer = InputSystem.pickPlayerAtPosition(x, y)
+	if targetPlayer then
+		UIManager.setModeSelect(targetPlayer)
+	end
+end
+
+-- ============================================================================
+-- BUTTON HANDLERS
+-- ============================================================================
+
+UI.btnCarry.MouseButton1Click:Connect(function()
+	if State.mode == "select" and State.selectedTargetId then
+		WaitTimer.start()
+		CarryRemote:FireServer("Request", {targetId = State.selectedTargetId})
+	end
+end)
+
+UI.btnAccept.MouseButton1Click:Connect(function()
+	if State.mode == "prompt" and State.lastRequesterId then
+		if State.isCarried then
+			State.isCarried = false
+			State.currentCarrierId = nil
+			State.currentCarrierName = nil
+			UIHelpers.hideFrame(UI.getDownContainer)
+			AnimationSystem.stopSitAnimation()
+			JumpBlocker.stop()
+		end
+		
+		CarryRemote:FireServer("Response", {requesterId = State.lastRequesterId, accept = true})
+		UIManager.resetMainFrame()
+	end
+end)
+
+UI.btnDecline.MouseButton1Click:Connect(function()
+	if State.mode == "prompt" and State.lastRequesterId then
+		CarryRemote:FireServer("Response", {requesterId = State.lastRequesterId, accept = false})
+		UIManager.resetMainFrame()
+	end
+end)
+
+UI.btnClose.MouseButton1Click:Connect(function()
+	if State.mode == "prompt" and State.lastRequesterId then
+		CarryRemote:FireServer("Response", {requesterId = State.lastRequesterId, accept = false})
+	end
+	UIManager.resetMainFrame()
+end)
+
+UI.btnGetDown.MouseButton1Click:Connect(function()
+	CarryRemote:FireServer("Stop", {})
+end)
+
+UI.btnAddFriend.MouseButton1Click:Connect(function()
+	if State.currentOtherId then
+		FriendSystem.requestFriendship(State.currentOtherId)
+	end
+end)
+
+UI.btnSync.MouseButton1Click:Connect(function()
+	local targetId = State.selectedTargetId or State.currentCarrierId
+	if not targetId then return end
+	
+	local targetPlayer = Players:GetPlayerByUserId(targetId)
+	if targetPlayer then
+		local syncRemote = ReplicatedStorage:FindFirstChild("Sync")
+		if syncRemote then
+			syncRemote:FireServer(targetPlayer)
+			State.isSynced = true
+			State.syncedPlayerId = targetId
+			UIHelpers.showFrame(UI.unsyncContainer)
+		end
+	end
+end)
+
+UI.btnUnsync.MouseButton1Click:Connect(function()
+	local targetId = State.syncedPlayerId
+	if not targetId then
+		State.isSynced = false
+		UIHelpers.hideFrame(UI.unsyncContainer)
+		return
+	end
+	
+	local targetPlayer = Players:GetPlayerByUserId(targetId)
+	if targetPlayer then
+		local unsyncRemote = ReplicatedStorage:FindFirstChild("Unsync")
+		if unsyncRemote then
+			unsyncRemote:FireServer(targetPlayer)
+			State.isSynced = false
+			State.syncedPlayerId = nil
+			UIHelpers.hideFrame(UI.unsyncContainer)
+		end
+	else
+		State.isSynced = false
+		State.syncedPlayerId = nil
+		UIHelpers.hideFrame(UI.unsyncContainer)
+	end
+end)
+
+UI.btnLeft.MouseButton1Click:Connect(function()
+	if #State.carriedList == 0 then return end
+	
+	State.carriedIndex = State.carriedIndex - 1
+	if State.carriedIndex < 1 then
+		State.carriedIndex = #State.carriedList
+	end
+	
+	CarrierManager.refresh()
+end)
+
+UI.btnRight.MouseButton1Click:Connect(function()
+	if #State.carriedList == 0 then return end
+	
+	State.carriedIndex = State.carriedIndex + 1
+	if State.carriedIndex > #State.carriedList then
+		State.carriedIndex = 1
+	end
+	
+	CarrierManager.refresh()
+end)
+
+UI.btnDrop.MouseButton1Click:Connect(function()
+	if #State.carriedList == 0 then return end
+	
+	local item = State.carriedList[State.carriedIndex]
+	if item and item.id then
+		CarryRemote:FireServer("Stop", {targetId = item.id})
+	end
+end)
+
+-- ============================================================================
+-- REMOTE EVENTS
+-- ============================================================================
+
+CarryRemote.OnClientEvent:Connect(function(action, data)
+	if action == "Prompt" then
+		UIManager.setModePrompt(data.fromId, data.fromName)
+		
+	elseif action == "Start" then
+		WaitTimer.stop()
+		
+		if data.youAreCarrier then
+			CarrierManager.addPlayer(data.targetId, data.targetName)
+			UIManager.resetMainFrame()
+		else
+			UIManager.setCarriedMode(data.carrierName, data.carrierId)
+			AnimationSystem.playSitAnimation()
+			AnimationSystem.stopCarryAnimation()
+			UIHelpers.hideFrame(UI.carrierContainer)
+		end
+		
+	elseif action == "End" then
+		WaitTimer.stop()
+		
+		if data.youAreCarrier then
+			if data.removedId then
+				CarrierManager.removePlayer(data.removedId)
+			end
+		else
+			State.isCarried = false
+			State.currentCarrierId = nil
+			State.currentCarrierName = nil
+			UIHelpers.hideFrame(UI.getDownContainer)
+			AnimationSystem.stopSitAnimation()
+			JumpBlocker.stop()
+		end
+		
+	elseif action == "CarrierList" then
+		CarrierManager.setList(data.list or {})
+		
+	elseif action == "Declined" then
+		WaitTimer.flashMessageAndClose("Declined", true)
+		
+	elseif action == "TooFar" then
+		WaitTimer.flashMessageAndClose("Too far", true)
+		
+	elseif action == "Busy" then
+		WaitTimer.flashMessageAndClose("Busy", true)
+		
+	elseif action == "Failed" then
+		WaitTimer.flashMessageAndClose("Failed", true)
+		
+	elseif action == "RequestExpired" then
+		WaitTimer.flashMessageAndClose("Timed out", true)
+		
+	elseif action == "PromptExpire" or action == "PromptClose" then
+		UIManager.resetMainFrame()
+		
+	elseif action == "Limit" then
+		WaitTimer.flashMessageAndClose("Limit reached", true)
+		
+	elseif action == "StateSync" then
+		if data.isCarried and data.carrierId and data.carrierName then
+			UIManager.setCarriedMode(data.carrierName, data.carrierId)
+			AnimationSystem.playSitAnimation()
+		end
+		
+		if data.carriedList and #data.carriedList > 0 then
+			CarrierManager.setList(data.carriedList)
+			AnimationSystem.playCarryAnimation()
+		end
+		
+		State.systemReady = true
+	end
+end)
+
+-- ============================================================================
+-- RESPAWN HANDLING
+-- ============================================================================
+
+local function cleanupOnRespawn()
+	InputSystem.disconnect()
+	
+	if AnimationSystem.tracks.sit then
+		pcall(function()
+			AnimationSystem.tracks.sit:Stop(0.1)
+		end)
+		AnimationSystem.tracks.sit = nil
+	end
+	
+	if AnimationSystem.tracks.carry then
+		pcall(function()
+			AnimationSystem.tracks.carry:Stop(0.1)
+		end)
+		AnimationSystem.tracks.carry = nil
+	end
+	
+	JumpBlocker.stop()
+	
+	-- Reset state
+	State.isCarried = false
+	State.waitingForApproval = false
+	State.isSynced = false
+	State.syncedPlayerId = nil
+	State.currentCarrierId = nil
+	State.currentCarrierName = nil
+	State.carriedList = {}
+	State.carriedIndex = 1
+	State.mode = "idle"
+	State.selectedTargetId = nil
+	State.selectedTargetName = nil
+	State.lastRequesterId = nil
+	State.currentOtherId = nil
+	State.waitToken = 0
+	State.systemReady = false
+	
+	-- Hide all UI
+	UI.mainContainer.Visible = false
+	UI.carrierContainer.Visible = false
+	UI.getDownContainer.Visible = false
+	UI.acceptDeclineContainer.Visible = false
+	UI.unsyncContainer.Visible = false
+end
+
+local function initializeAfterRespawn()
+	task.wait(0.5)
+	CarryRemote:FireServer("RequestState", {})
+	task.wait(1)
+	InputSystem.connect(handlePlayerClick)
+	State.systemReady = true
+end
+
+player.CharacterAdded:Connect(function()
+	cleanupOnRespawn()
+	initializeAfterRespawn()
+end)
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+print("✨ Carry System v1.0 by ItoRenz00")
+
+task.spawn(function()
+	task.wait(0.5)
+	InputSystem.connect(handlePlayerClick)
+	CarryRemote:FireServer("RequestState", {})
+	task.wait(1)
+	State.systemReady = true
+	print("✅ Ready!")
+end)
