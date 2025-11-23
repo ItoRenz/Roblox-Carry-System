@@ -1,0 +1,1247 @@
+-- ============================================================================
+-- CARRY SYSTEM SERVER
+-- Author: ItoRenz00
+-- Version: 1.0
+-- Description: Server-side logic for professional carry/piggyback system
+-- ============================================================================
+
+-- ============================================================================
+-- SERVICES
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+-- ============================================================================
+-- CONFIGURATION
+-- ============================================================================
+
+local Config = require(script.Parent:WaitForChild("CarryConfig"))
+
+-- ============================================================================
+-- REMOTE SETUP
+-- ============================================================================
+
+local CarryRemote = ReplicatedStorage:FindFirstChild(Config.REMOTE_NAME) or Instance.new("RemoteEvent")
+CarryRemote.Name = Config.REMOTE_NAME
+CarryRemote.Parent = ReplicatedStorage
+
+-- ============================================================================
+-- LOGGING SYSTEM
+-- ============================================================================
+
+local Logger = {}
+
+function Logger.info(message, context)
+	print(string.format("[INFO] %s - %s", context or "CarrySystem", message))
+end
+
+function Logger.warn(message, context)
+	warn(string.format("[WARN] %s - %s", context or "CarrySystem", message))
+end
+
+function Logger.error(message, context)
+	warn(string.format("[ERROR] %s - %s", context or "CarrySystem", message))
+end
+
+-- ============================================================================
+-- STATE MANAGEMENT
+-- ============================================================================
+
+local State = {
+	-- Core relationships
+	carryingByCarrier = {}, -- [carrierId] = { [targetId] = targetPlayer }
+	carriedByTarget = {}, -- [targetId] = carrierPlayer
+	slotByCarrier = {}, -- [carrierId] = { [targetId] = slotIndex }
+	
+	-- Request management
+	pendingRequests = {}, -- [targetId] = { requester = Player, time = number }
+	
+	-- Rate limiting
+	rateLimiters = {}, -- [userId] = { lastRequestTime = number, requestCount = number }
+	
+	-- Saved states
+	savedPhysicsProps = {}, -- [userId] = { [part] = { cc, ml } }
+	savedHumanoidState = {}, -- [userId] = { ws, useJP, jp, jh, autoRotate, jumpEnabled }
+	
+	-- Thread safety
+	locks = {}, -- [userId] = boolean
+	detachGuard = {}, -- [userId] = boolean
+}
+
+-- ============================================================================
+-- CHARACTER & PART HELPERS
+-- ============================================================================
+
+local function getCharacterParts(player)
+	local character = player.Character
+	if not character then
+		return nil, nil, nil
+	end
+	
+	local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	
+	if not (humanoidRootPart and humanoid) then
+		return nil, nil, nil
+	end
+	
+	return character, humanoidRootPart, humanoid
+end
+
+-- ============================================================================
+-- LOCK MANAGEMENT
+-- ============================================================================
+
+local function acquireLock(userId)
+	while State.locks[userId] do
+		task.wait()
+	end
+	State.locks[userId] = true
+end
+
+local function releaseLock(userId)
+	State.locks[userId] = false
+end
+
+local function acquireLocks(userIdA, userIdB)
+	if userIdA == userIdB then
+		acquireLock(userIdA)
+		return
+	end
+	
+	-- Always acquire in same order to prevent deadlock
+	if userIdA < userIdB then
+		acquireLock(userIdA)
+		acquireLock(userIdB)
+	else
+		acquireLock(userIdB)
+		acquireLock(userIdA)
+	end
+end
+
+local function releaseLocks(userIdA, userIdB)
+	releaseLock(userIdA)
+	if userIdB ~= userIdA then
+		releaseLock(userIdB)
+	end
+end
+
+-- ============================================================================
+-- CARRY STATE QUERIES
+-- ============================================================================
+
+local function getCarryMap(carrier)
+	local carrierId = carrier.UserId
+	local map = State.carryingByCarrier[carrierId]
+	
+	if not map then
+		map = {}
+		State.carryingByCarrier[carrierId] = map
+	end
+	
+	return map
+end
+
+local function getSlotMap(carrier)
+	local carrierId = carrier.UserId
+	local map = State.slotByCarrier[carrierId]
+	
+	if not map then
+		map = {}
+		State.slotByCarrier[carrierId] = map
+	end
+	
+	return map
+end
+
+local function countCarried(carrier)
+	local map = State.carryingByCarrier[carrier.UserId]
+	if not map then
+		return 0
+	end
+	
+	local count = 0
+	for _ in pairs(map) do
+		count += 1
+	end
+	
+	return count
+end
+
+local function isBeingCarried(player)
+	return State.carriedByTarget[player.UserId] ~= nil
+end
+
+local function canCarrierRequest(player)
+	return not isBeingCarried(player)
+end
+
+local function isTargetAvailable(player)
+	return not isBeingCarried(player)
+end
+
+-- ============================================================================
+-- HUMANOID STATE PRESERVATION
+-- ============================================================================
+
+local function saveHumanoidState(userId, humanoid)
+	State.savedHumanoidState[userId] = {
+		walkSpeed = humanoid.WalkSpeed,
+		useJumpPower = humanoid.UseJumpPower,
+		jumpPower = humanoid.JumpPower,
+		jumpHeight = humanoid.JumpHeight,
+		autoRotate = humanoid.AutoRotate,
+		jumpEnabled = humanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping),
+	}
+end
+
+local function restoreHumanoidState(userId, humanoid)
+	local savedState = State.savedHumanoidState[userId]
+	
+	if savedState then
+		humanoid.WalkSpeed = savedState.walkSpeed
+		humanoid.AutoRotate = savedState.autoRotate
+		
+		if savedState.useJumpPower then
+			humanoid.JumpPower = savedState.jumpPower
+		else
+			humanoid.JumpHeight = savedState.jumpHeight
+		end
+		
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, savedState.jumpEnabled)
+		State.savedHumanoidState[userId] = nil
+	else
+		-- Default values
+		humanoid.AutoRotate = true
+		humanoid.WalkSpeed = 16
+		
+		if humanoid.UseJumpPower then
+			humanoid.JumpPower = 50
+		else
+			humanoid.JumpHeight = 7.2
+		end
+		
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+	end
+end
+
+-- ============================================================================
+-- PHYSICS MANAGEMENT
+-- ============================================================================
+
+local function makeCarriedLightweight(character, userId)
+	local propertyMap = {}
+	
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			propertyMap[descendant] = {
+				canCollide = descendant.CanCollide,
+				massless = descendant.Massless
+			}
+			
+			descendant.CanCollide = false
+			descendant.Massless = true
+		end
+	end
+	
+	State.savedPhysicsProps[userId] = propertyMap
+end
+
+local function restorePhysicsProperties(userId)
+	local propertyMap = State.savedPhysicsProps[userId]
+	if not propertyMap then
+		return
+	end
+	
+	for part, properties in pairs(propertyMap) do
+		if part and part.Parent then
+			part.CanCollide = properties.canCollide
+			part.Massless = properties.massless
+		end
+	end
+	
+	State.savedPhysicsProps[userId] = nil
+end
+
+-- ============================================================================
+-- WELD MANAGEMENT
+-- ============================================================================
+
+local function clearCarryWeldsFromCharacter(character)
+	if not character then
+		return
+	end
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	if not hrp then
+		return
+	end
+	
+	for _, child in ipairs(hrp:GetChildren()) do
+		if child:IsA("WeldConstraint") and child.Name == "CarryWeld" then
+			child:Destroy()
+		end
+	end
+end
+
+local function findCarryWeld(targetHRP, carrierHRP)
+	for _, child in ipairs(targetHRP:GetChildren()) do
+		if child:IsA("WeldConstraint") and 
+		   child.Name == "CarryWeld" and 
+		   child.Part0 == carrierHRP and 
+		   child.Part1 == targetHRP then
+			return child
+		end
+	end
+	return nil
+end
+
+local function createCarryWeld(carrierHRP, targetHRP)
+	local existingWeld = findCarryWeld(targetHRP, carrierHRP)
+	
+	if existingWeld then
+		return existingWeld
+	end
+	
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "CarryWeld"
+	weld.Part0 = carrierHRP
+	weld.Part1 = targetHRP
+	weld.Parent = targetHRP
+	
+	return weld
+end
+
+local function destroyCarryWeld(carrierHRP, targetHRP)
+	local weld = findCarryWeld(targetHRP, carrierHRP)
+	if weld then
+		weld:Destroy()
+	end
+end
+
+-- ============================================================================
+-- UI SYNCHRONIZATION
+-- ============================================================================
+
+local function buildCarriedList(carrier)
+	local list = {}
+	local carryMap = State.carryingByCarrier[carrier.UserId]
+	
+	if carryMap then
+		for targetId, targetPlayer in pairs(carryMap) do
+			table.insert(list, {
+				id = targetId,
+				name = targetPlayer.DisplayName
+			})
+		end
+		
+		-- Sort alphabetically by name
+		table.sort(list, function(a, b)
+			return a.name:lower() < b.name:lower()
+		end)
+	end
+	
+	return list
+end
+
+local function sendCarrierListUpdate(carrier)
+	CarryRemote:FireClient(carrier, "CarrierList", {
+		list = buildCarriedList(carrier)
+	})
+end
+
+-- ============================================================================
+-- SLOT REINDEXING SYSTEM
+-- ============================================================================
+
+local reindexJobs = {}
+
+local function queueSlotReindex(carrier)
+	local carrierId = carrier.UserId
+	
+	if not reindexJobs[carrierId] then
+		reindexJobs[carrierId] = {
+			pendingSlots = {}
+		}
+		
+		local job = reindexJobs[carrierId]
+		
+		job.connection = RunService.Heartbeat:Connect(function()
+			acquireLock(carrierId)
+			
+			local success, errorMessage = pcall(function()
+				local _, carrierHRP = getCharacterParts(carrier)
+				if not carrierHRP then
+					return
+				end
+				
+				for targetUserId, newSlot in pairs(job.pendingSlots) do
+					local targetPlayer = Players:GetPlayerByUserId(targetUserId)
+					if targetPlayer then
+						local _, targetHRP = getCharacterParts(targetPlayer)
+						if targetHRP then
+							local currentSlot = State.slotByCarrier[carrierId][targetUserId]
+							
+							if currentSlot and currentSlot ~= newSlot then
+								destroyCarryWeld(carrierHRP, targetHRP)
+								targetHRP.CFrame = carrierHRP.CFrame * Config.getSlotOffset(newSlot)
+								createCarryWeld(carrierHRP, targetHRP)
+								State.slotByCarrier[carrierId][targetUserId] = newSlot
+							end
+						end
+					end
+				end
+				
+				job.pendingSlots = {}
+			end)
+			
+			if not success then
+				Logger.error("Reindexing failed for carrier " .. carrierId .. ": " .. tostring(errorMessage), "SlotReindex")
+			end
+			
+			releaseLock(carrierId)
+			
+			-- Clean up if no more pending slots
+			if not next(job.pendingSlots) then
+				job.connection:Disconnect()
+				reindexJobs[carrierId] = nil
+			end
+		end)
+	end
+	
+	-- Build sorted list of targets
+	local slotMap = State.slotByCarrier[carrierId]
+	if slotMap then
+		local sortedTargets = {}
+		
+		for targetUserId, _ in pairs(slotMap) do
+			local targetPlayer = Players:GetPlayerByUserId(targetUserId)
+			if targetPlayer then
+				table.insert(sortedTargets, {id = targetUserId})
+			end
+		end
+		
+		-- Sort alphabetically by player name
+		table.sort(sortedTargets, function(a, b)
+			local playerA = Players:GetPlayerByUserId(a.id)
+			local playerB = Players:GetPlayerByUserId(b.id)
+			
+			local nameA = playerA and playerA.DisplayName or ""
+			local nameB = playerB and playerB.DisplayName or ""
+			
+			return nameA:lower() < nameB:lower()
+		end)
+		
+		-- Assign new slot indices
+		for newIndex, targetData in ipairs(sortedTargets) do
+			reindexJobs[carrierId].pendingSlots[targetData.id] = newIndex
+		end
+	end
+end
+
+-- ============================================================================
+-- NOTIFICATION SYSTEM
+-- ============================================================================
+
+local function notifyCarryStart(carrier, target)
+	local totalCarried = countCarried(carrier)
+	
+	-- Notify carrier
+	CarryRemote:FireClient(carrier, "Start", {
+		carrierId = carrier.UserId,
+		carrierName = carrier.DisplayName,
+		targetId = target.UserId,
+		targetName = target.DisplayName,
+		youAreCarrier = true,
+		carrierActiveCount = totalCarried
+	})
+	
+	-- Notify target
+	CarryRemote:FireClient(target, "Start", {
+		carrierId = carrier.UserId,
+		carrierName = carrier.DisplayName,
+		targetId = target.UserId,
+		targetName = target.DisplayName,
+		youAreCarrier = false
+	})
+end
+
+local function notifyCarrierOnly(carrier, removedTarget, reason)
+	local totalCarried = countCarried(carrier)
+	
+	CarryRemote:FireClient(carrier, "End", {
+		reason = reason or "end",
+		youAreCarrier = true,
+		carrierActiveCount = totalCarried,
+		removedId = removedTarget.UserId,
+		removedName = removedTarget.DisplayName,
+	})
+end
+
+local function notifyCarryEnd(carrier, target, reason)
+	local totalCarried = countCarried(carrier)
+	
+	-- Notify carrier
+	CarryRemote:FireClient(carrier, "End", {
+		reason = reason or "end",
+		youAreCarrier = true,
+		carrierActiveCount = totalCarried,
+		removedId = target.UserId,
+		removedName = target.DisplayName,
+	})
+	
+	-- Clear target state
+	State.carriedByTarget[target.UserId] = nil
+	
+	-- Notify target
+	local stillCarrying = countCarried(target)
+	CarryRemote:FireClient(target, "End", {
+		reason = reason or "end",
+		youAreCarrier = false,
+		yourCarryCount = stillCarrying
+	})
+end
+
+-- ============================================================================
+-- POSITION MANAGEMENT
+-- ============================================================================
+
+local function positionDroppedPlayer(carrierHRP, targetHRP)
+	if not (carrierHRP and targetHRP) then
+		return
+	end
+	
+	local dropDistance = 3
+	local dropOffset = -carrierHRP.CFrame.LookVector * dropDistance
+	local dropPosition = carrierHRP.Position + dropOffset
+	
+	-- Keep same Y level as carrier
+	local finalPosition = Vector3.new(
+		dropPosition.X,
+		carrierHRP.Position.Y,
+		dropPosition.Z
+	)
+	
+	-- Match carrier's Y rotation
+	local _, carrierYRotation, _ = carrierHRP.CFrame:ToOrientation()
+	targetHRP.CFrame = CFrame.new(finalPosition) * CFrame.Angles(0, carrierYRotation, 0)
+end
+
+-- ============================================================================
+-- DETACHMENT LOGIC
+-- ============================================================================
+
+local function detachPair(carrier, target, reason)
+	local carrierId = carrier.UserId
+	local targetId = target.UserId
+	
+	acquireLock(carrierId)
+	
+	-- Get character parts
+	local carrierChar, carrierHRP = getCharacterParts(carrier)
+	local targetChar, targetHRP, targetHum = getCharacterParts(target)
+	
+	-- Position and unweld
+	if carrierHRP and targetHRP then
+		positionDroppedPlayer(carrierHRP, targetHRP)
+		task.wait(0.05)
+		destroyCarryWeld(carrierHRP, targetHRP)
+	end
+	
+	-- Restore target state
+	if targetHum then
+		restoreHumanoidState(targetId, targetHum)
+		targetHum.Sit = false
+		targetHum.Jump = false
+	end
+	
+	restorePhysicsProperties(targetId)
+	
+	-- Update state
+	local carryMap = State.carryingByCarrier[carrierId]
+	if carryMap then
+		carryMap[targetId] = nil
+		
+		if not next(carryMap) then
+			State.carryingByCarrier[carrierId] = nil
+		end
+	end
+	
+	if State.slotByCarrier[carrierId] then
+		State.slotByCarrier[carrierId][targetId] = nil
+	end
+	
+	releaseLock(carrierId)
+	
+	-- Notify clients
+	notifyCarryEnd(carrier, target, reason)
+	
+	-- Reindex slots and update UI
+	task.defer(function()
+		if State.carryingByCarrier[carrierId] then
+			queueSlotReindex(carrier)
+		end
+		sendCarrierListUpdate(carrier)
+	end)
+end
+
+local function detachAllFromCarrier(carrier, reason)
+	local carryMap = State.carryingByCarrier[carrier.UserId]
+	if not carryMap then
+		return
+	end
+	
+	-- Create list of targets to detach
+	local targets = {}
+	for _, target in pairs(carryMap) do
+		table.insert(targets, target)
+	end
+	
+	-- Detach each target
+	for _, target in ipairs(targets) do
+		detachPair(carrier, target, reason)
+	end
+end
+
+local function detachIfAny(player, reason)
+	if State.carriedByTarget[player.UserId] then
+		-- Player is being carried
+		detachPair(State.carriedByTarget[player.UserId], player, reason)
+	elseif State.carryingByCarrier[player.UserId] then
+		-- Player is carrying others
+		detachAllFromCarrier(player, reason)
+	end
+end
+
+local function safeDetachIfAny(player, reason)
+	if State.detachGuard[player.UserId] then
+		return
+	end
+	
+	State.detachGuard[player.UserId] = true
+	
+	task.defer(function()
+		detachIfAny(player, reason)
+		State.detachGuard[player.UserId] = nil
+	end)
+end
+
+-- ============================================================================
+-- PASSENGER TRANSFER SYSTEM
+-- ============================================================================
+
+local function transferPassengers(newCarrier, oldCarrier)
+	local oldCarryMap = State.carryingByCarrier[oldCarrier.UserId]
+	if not oldCarryMap then
+		return
+	end
+	
+	local oldSlotMap = State.slotByCarrier[oldCarrier.UserId] or {}
+	local targetsToTransfer = {}
+	
+	-- Build list of targets with their current slots
+	for targetId, target in pairs(oldCarryMap) do
+		table.insert(targetsToTransfer, {
+			target = target,
+			slot = oldSlotMap[targetId] or 999
+		})
+	end
+	
+	-- Sort by slot order
+	table.sort(targetsToTransfer, function(a, b)
+		return a.slot < b.slot
+	end)
+	
+	local _, newCarrierHRP = getCharacterParts(newCarrier)
+	local _, oldCarrierHRP = getCharacterParts(oldCarrier)
+	
+	if not (newCarrierHRP and oldCarrierHRP) then
+		return
+	end
+	
+	acquireLocks(newCarrier.UserId, oldCarrier.UserId)
+	
+	-- Transfer each passenger
+	for _, entry in ipairs(targetsToTransfer) do
+		local target = entry.target
+		local targetChar, targetHRP, targetHum = getCharacterParts(target)
+		
+		if targetChar and targetHRP and targetHum then
+			-- Find available slot on new carrier
+			local usedSlots = {}
+			local newSlotMap = getSlotMap(newCarrier)
+			
+			for _, slotIndex in pairs(newSlotMap) do
+				usedSlots[slotIndex] = true
+			end
+			
+			local availableSlot = nil
+			for i = 1, Config.MAX_CARRY do
+				if not usedSlots[i] then
+					availableSlot = i
+					break
+				end
+			end
+			
+			if not availableSlot then
+				continue
+			end
+			
+			-- Remove from old carrier
+			destroyCarryWeld(oldCarrierHRP, targetHRP)
+			
+			-- Attach to new carrier
+			targetHRP.CFrame = newCarrierHRP.CFrame * Config.getSlotOffset(availableSlot)
+			createCarryWeld(newCarrierHRP, targetHRP)
+			
+			-- Set up humanoid state
+			saveHumanoidState(target.UserId, targetHum)
+			targetHum.AutoRotate = false
+			targetHum.WalkSpeed = 0
+			
+			if targetHum.UseJumpPower then
+				targetHum.JumpPower = 0
+			else
+				targetHum.JumpHeight = 0
+			end
+			
+			targetHum.Sit = true
+			targetHum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+			targetHum.Jump = false
+			
+			-- Update state mappings
+			local oldMap = State.carryingByCarrier[oldCarrier.UserId]
+			if oldMap then
+				oldMap[target.UserId] = nil
+				
+				if not next(oldMap) then
+					State.carryingByCarrier[oldCarrier.UserId] = nil
+				end
+			end
+			
+			if State.slotByCarrier[oldCarrier.UserId] then
+				State.slotByCarrier[oldCarrier.UserId][target.UserId] = nil
+			end
+			
+			getCarryMap(newCarrier)[target.UserId] = target
+			getSlotMap(newCarrier)[target.UserId] = availableSlot
+			State.carriedByTarget[target.UserId] = newCarrier
+			
+			-- Notify clients
+			notifyCarrierOnly(oldCarrier, target, "transfer")
+			notifyCarryStart(newCarrier, target)
+		end
+	end
+	
+	releaseLocks(newCarrier.UserId, oldCarrier.UserId)
+	
+	-- Update UI
+	task.defer(function()
+		if State.carryingByCarrier[oldCarrier.UserId] then
+			queueSlotReindex(oldCarrier)
+		end
+	end)
+	
+	task.defer(function()
+		sendCarrierListUpdate(newCarrier)
+		sendCarrierListUpdate(oldCarrier)
+	end)
+end
+
+-- ============================================================================
+-- RATE LIMITING
+-- ============================================================================
+
+local function isRateLimited(player)
+	local now = os.clock()
+	local limiter = State.rateLimiters[player.UserId]
+	
+	if not limiter then
+		limiter = {
+			lastRequestTime = 0,
+			requestCount = 0
+		}
+		State.rateLimiters[player.UserId] = limiter
+	end
+	
+	if now - limiter.lastRequestTime > Config.RATE_LIMIT_WINDOW then
+		limiter.lastRequestTime = now
+		limiter.requestCount = 1
+		return false
+	else
+		if limiter.requestCount >= Config.RATE_LIMIT_COUNT then
+			return true
+		else
+			limiter.requestCount += 1
+			return false
+		end
+	end
+end
+
+-- ============================================================================
+-- PENDING REQUEST MANAGEMENT
+-- ============================================================================
+
+-- Auto-cleanup expired requests
+task.spawn(function()
+	while true do
+		task.wait(2)
+		local now = os.clock()
+		
+		for targetId, requestInfo in pairs(State.pendingRequests) do
+			if now - requestInfo.time > Config.PENDING_TIMEOUT then
+				local target = Players:GetPlayerByUserId(targetId)
+				
+				if requestInfo.requester and requestInfo.requester.Parent == Players then
+					CarryRemote:FireClient(requestInfo.requester, "RequestExpired", {
+						targetId = targetId
+					})
+					
+					if target then
+						CarryRemote:FireClient(target, "PromptExpire", {})
+					end
+				end
+				
+				State.pendingRequests[targetId] = nil
+			end
+		end
+	end
+end)
+
+local function hasPendingIncomingRequest(player)
+	return State.pendingRequests[player.UserId] ~= nil
+end
+
+local function hasPendingOutgoingRequest(player)
+	for _, requestInfo in pairs(State.pendingRequests) do
+		if requestInfo.requester == player then
+			return true
+		end
+	end
+	return false
+end
+
+-- ============================================================================
+-- DISTANCE CHECK SYSTEM
+-- ============================================================================
+
+local distanceCheckJobs = {}
+
+local function startDistanceCheck(carrier, target)
+	local carrierId = carrier.UserId
+	local targetId = target.UserId
+	local key = carrierId .. "_" .. targetId
+	
+	-- Stop existing check if any
+	if distanceCheckJobs[key] then
+		distanceCheckJobs[key].connection:Disconnect()
+	end
+	
+	local connection = RunService.Heartbeat:Connect(function()
+		local _, carrierHRP = getCharacterParts(carrier)
+		local _, targetHRP = getCharacterParts(target)
+		
+		if not (carrierHRP and targetHRP) then
+			connection:Disconnect()
+			distanceCheckJobs[key] = nil
+			
+			if State.carriedByTarget[targetId] == carrierId then
+				detachPair(carrier, target, "character lost")
+			end
+			return
+		end
+		
+		local distance = (carrierHRP.Position - targetHRP.Position).Magnitude
+		if distance > Config.MAX_DISTANCE then
+			connection:Disconnect()
+			distanceCheckJobs[key] = nil
+			
+			if State.carriedByTarget[targetId] == carrierId then
+				detachPair(carrier, target, "too far")
+			end
+		end
+	end)
+	
+	distanceCheckJobs[key] = {
+		connection = connection,
+		targetId = targetId
+	}
+end
+
+local function stopDistanceCheck(carrierId, targetId)
+	local key = carrierId .. "_" .. targetId
+	
+	if distanceCheckJobs[key] then
+		distanceCheckJobs[key].connection:Disconnect()
+		distanceCheckJobs[key] = nil
+	end
+end
+
+-- ============================================================================
+-- START CARRY LOGIC
+-- ============================================================================
+
+local function startCarry(carrier, target)
+	local carrierChar, carrierHRP = getCharacterParts(carrier)
+	local targetChar, targetHRP, targetHum = getCharacterParts(target)
+	
+	if not (carrierChar and carrierHRP and targetChar and targetHRP and targetHum) then
+		return false, "character missing"
+	end
+	
+	acquireLock(carrier.UserId)
+	
+	local success, errorMessage = pcall(function()
+		-- Validation checks
+		local distance = (carrierHRP.Position - targetHRP.Position).Magnitude
+		if distance > Config.MAX_DISTANCE then
+			error("too far")
+		end
+		
+		if not canCarrierRequest(carrier) then
+			error("busy")
+		end
+		
+		if not isTargetAvailable(target) then
+			error("busy")
+		end
+		
+		-- Check capacity including transfer
+		local targetPassengerCount = countCarried(target)
+		local totalAfterCarry = countCarried(carrier) + 1 + targetPassengerCount
+		
+		if totalAfterCarry > Config.MAX_CARRY then
+			error("limit_transfer")
+		end
+		
+		-- Find available slot
+		local usedSlots = {}
+		local slotMap = getSlotMap(carrier)
+		
+		for _, slotIndex in pairs(slotMap) do
+			usedSlots[slotIndex] = true
+		end
+		
+		local availableSlot = nil
+		for i = 1, Config.MAX_CARRY do
+			if not usedSlots[i] then
+				availableSlot = i
+				break
+			end
+		end
+		
+		if not availableSlot then
+			error("limit")
+		end
+		
+		-- Position and weld target
+		targetHRP.CFrame = carrierHRP.CFrame * Config.getSlotOffset(availableSlot)
+		createCarryWeld(carrierHRP, targetHRP)
+		
+		-- Configure humanoid
+		saveHumanoidState(target.UserId, targetHum)
+		targetHum.AutoRotate = false
+		targetHum.WalkSpeed = 0
+		
+		if targetHum.UseJumpPower then
+			targetHum.JumpPower = 0
+		else
+			targetHum.JumpHeight = 0
+		end
+		
+		targetHum.Sit = true
+		targetHum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+		targetHum.Jump = false
+		
+		-- Make target lightweight
+		makeCarriedLightweight(targetChar, target.UserId)
+		
+		-- Update state
+		getCarryMap(carrier)[target.UserId] = target
+		getSlotMap(carrier)[target.UserId] = availableSlot
+		State.carriedByTarget[target.UserId] = carrier
+		
+		-- Start monitoring distance
+		startDistanceCheck(carrier, target)
+		
+		-- Set up cleanup handlers
+		local function bindCharacterCleanup(character, player)
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			if humanoid then
+				humanoid.Died:Connect(function()
+					safeDetachIfAny(player, "death")
+				end)
+			end
+			
+			character.AncestryChanged:Connect(function(_, parent)
+				if not parent then
+					safeDetachIfAny(player, "character removed")
+				end
+			end)
+		end
+		
+		bindCharacterCleanup(carrierChar, carrier)
+		bindCharacterCleanup(targetChar, target)
+		
+		-- Notify clients
+		notifyCarryStart(carrier, target)
+	end)
+	
+	releaseLock(carrier.UserId)
+	
+	if not success then
+		return false, tostring(errorMessage)
+	end
+	
+	-- Transfer passengers if target is carrying anyone
+	if countCarried(target) > 0 then
+		transferPassengers(carrier, target)
+	end
+	
+	sendCarrierListUpdate(carrier)
+	return true
+end
+
+-- ============================================================================
+-- REMOTE EVENT HANDLERS
+-- ============================================================================
+
+CarryRemote.OnServerEvent:Connect(function(player, action, data)
+	if action == "Request" then
+		-- Rate limiting
+		if isRateLimited(player) then
+			Logger.warn(player.Name .. " hit rate limit for requests", "RateLimit")
+			return
+		end
+		
+		-- Validate target
+		local targetId = data and data.targetId
+		if type(targetId) ~= "number" then
+			return
+		end
+		
+		local target = Players:GetPlayerByUserId(targetId)
+		if not target or target == player then
+			return
+		end
+		
+		-- Check character parts exist
+		local _, carrierHRP = getCharacterParts(player)
+		local _, targetHRP = getCharacterParts(target)
+		if not (carrierHRP and targetHRP) then
+			return
+		end
+		
+		-- Distance check
+		local distance = (carrierHRP.Position - targetHRP.Position).Magnitude
+		if distance > Config.MAX_DISTANCE then
+			CarryRemote:FireClient(player, "TooFar", {targetId = targetId})
+			return
+		end
+		
+		-- Capacity check including potential transfer
+		local targetPassengerCount = countCarried(target)
+		local totalAfterCarry = countCarried(player) + 1 + targetPassengerCount
+		
+		if totalAfterCarry > Config.MAX_CARRY then
+			CarryRemote:FireClient(player, "Limit", {
+				max = Config.MAX_CARRY,
+				reason = "transfer"
+			})
+			return
+		end
+		
+		-- Availability check
+		if not canCarrierRequest(player) or not isTargetAvailable(target) then
+			CarryRemote:FireClient(player, "Busy", {})
+			return
+		end
+		
+		-- Pending request check
+		if hasPendingIncomingRequest(player) or 
+		   hasPendingOutgoingRequest(player) or 
+		   State.pendingRequests[target.UserId] then
+			CarryRemote:FireClient(player, "Busy", {})
+			return
+		end
+		
+		-- Create pending request
+		State.pendingRequests[target.UserId] = {
+			requester = player,
+			time = os.clock()
+		}
+		
+		CarryRemote:FireClient(target, "Prompt", {
+			fromId = player.UserId,
+			fromName = player.DisplayName
+		})
+		
+	elseif action == "Response" then
+		local accept = data and data.accept == true
+		local requesterId = data and data.requesterId
+		
+		if type(requesterId) ~= "number" then
+			return
+		end
+		
+		local requester = Players:GetPlayerByUserId(requesterId)
+		if not requester then
+			return
+		end
+		
+		-- Validate pending request
+		local pendingRequest = State.pendingRequests[player.UserId]
+		if not pendingRequest or pendingRequest.requester ~= requester then
+			return
+		end
+		
+		State.pendingRequests[player.UserId] = nil
+		
+		if not accept then
+			CarryRemote:FireClient(requester, "Declined", {
+				targetId = player.UserId
+			})
+			CarryRemote:FireClient(player, "PromptClose", {})
+			return
+		end
+		
+		-- Attempt to start carry
+		local success, errorMessage = startCarry(requester, player)
+		
+		if not success then
+			if tostring(errorMessage) == "limit_transfer" then
+				CarryRemote:FireClient(requester, "Limit", {
+					max = Config.MAX_CARRY,
+					reason = "transfer"
+				})
+				CarryRemote:FireClient(player, "Failed", {
+					reason = "limit_transfer"
+				})
+			else
+				CarryRemote:FireClient(requester, "Failed", {
+					reason = errorMessage
+				})
+				CarryRemote:FireClient(player, "Failed", {
+					reason = errorMessage
+				})
+			end
+		end
+		
+	elseif action == "Stop" then
+		local targetId = data and data.targetId
+		
+		-- Specific target drop
+		if type(targetId) == "number" then
+			local target = Players:GetPlayerByUserId(targetId)
+			
+			if target and 
+			   State.carryingByCarrier[player.UserId] and
+			   State.carryingByCarrier[player.UserId][targetId] then
+				detachPair(player, target, "stop")
+				return
+			end
+		end
+		
+		-- General stop (player wants to get down or drop all)
+		detachIfAny(player, "stop")
+		
+	elseif action == "RequestState" then
+		Logger.info("State sync requested by " .. player.Name, "StateSync")
+		
+		-- Check if player is being carried
+		local carrier = State.carriedByTarget[player.UserId]
+		if carrier then
+			CarryRemote:FireClient(player, "StateSync", {
+				isCarried = true,
+				carrierId = carrier.UserId,
+				carrierName = carrier.DisplayName
+			})
+			return
+		end
+		
+		-- Check if player is carrying others
+		local carriedList = buildCarriedList(player)
+		if #carriedList > 0 then
+			CarryRemote:FireClient(player, "StateSync", {
+				isCarried = false,
+				carriedList = carriedList
+			})
+			return
+		end
+		
+		Logger.info("No active carry state for " .. player.Name, "StateSync")
+	end
+end)
+
+-- ============================================================================
+-- PLAYER EVENT HANDLERS
+-- ============================================================================
+
+local function onCharacterAdded(player, character)
+	task.defer(function()
+		-- Clean up any existing carry welds
+		clearCarryWeldsFromCharacter(character)
+		
+		-- Reset humanoid to default state
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.Sit = false
+			humanoid.AutoRotate = true
+			humanoid.WalkSpeed = 16
+			
+			if humanoid.UseJumpPower then
+				humanoid.JumpPower = 50
+			else
+				humanoid.JumpHeight = 7.2
+			end
+			
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, true)
+			humanoid.Jump = false
+		end
+		
+		-- Clear saved states
+		State.savedPhysicsProps[player.UserId] = nil
+		State.savedHumanoidState[player.UserId] = nil
+		
+		-- Detach from any carry relationships
+		safeDetachIfAny(player, "respawn")
+	end)
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		onCharacterAdded(player, character)
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	-- Clean up pending requests
+	State.pendingRequests[player.UserId] = nil
+	State.rateLimiters[player.UserId] = nil
+	
+	-- Clean up distance checks
+	for key, job in pairs(distanceCheckJobs) do
+		if string.find(key, player.UserId .. "_") or 
+		   string.find(key, "_" .. player.UserId) then
+			job.connection:Disconnect()
+			distanceCheckJobs[key] = nil
+		end
+	end
+	
+	-- Detach from any carry relationships
+	detachIfAny(player, "left")
+end)
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+print("========================================")
+print("✨ Carry System Server v1.0")
+print("========================================")
+print("✅ Author: ItoRenz00")
+print("✅ Status: Ready")
+print("========================================")
