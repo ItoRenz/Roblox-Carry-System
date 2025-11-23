@@ -1,0 +1,153 @@
+-- ============================================================================
+-- CARRY SYSTEM CONFIGURATION
+-- Author: ItoRenz00
+-- Version: 1.0
+-- Description: Configuration module for the Carry System
+-- ============================================================================
+
+--[[
+	Carry System Configuration Module
+	
+	This module contains all configurable settings for the Carry System,
+	including timing, limits, rate limiting, and formation offsets.
+]]
+
+local Config = {}
+
+-- ============================================================================
+-- REMOTE CONFIGURATION
+-- ============================================================================
+
+-- Name of the RemoteEvent used for client-server communication
+Config.REMOTE_NAME = "CarryRemote"
+
+-- ============================================================================
+-- TIMING AND LIMITS
+-- ============================================================================
+
+-- Timeout duration for pending carry requests (in seconds)
+-- After this time, unanswered requests will be automatically cancelled
+Config.PENDING_TIMEOUT = 8
+
+-- Maximum distance for carry requests (in studs)
+-- Players must be within this distance to initiate a carry
+Config.MAX_DISTANCE = 20
+
+-- Maximum number of players that can be carried at once
+-- This includes nested carrying (carried players carrying others)
+Config.MAX_CARRY = 50
+
+-- ============================================================================
+-- RATE LIMITING
+-- ============================================================================
+
+-- Maximum number of carry requests a player can make within the time window
+Config.RATE_LIMIT_COUNT = 3
+
+-- Time window for rate limiting (in seconds)
+-- After this window, the request count resets
+Config.RATE_LIMIT_WINDOW = 5
+
+-- ============================================================================
+-- FORMATION OFFSETS
+-- ============================================================================
+
+-- Base Configuration
+Config.BASE_Z = 1.6          -- Base Z offset from carrier (studs)
+Config.SPACING_Z = 1.1       -- Spacing between carried players on Z axis (studs)
+Config.Y_OFFSET = 0.9        -- Base Y offset from ground (studs)
+
+-- Slot-Specific Adjustments
+Config.SLOT1_ADJ_Z = -0.2    -- Z adjustment for first slot (studs)
+Config.SLOT2_ADJ_Z = 0.2     -- Z adjustment for second slot (studs)
+
+-- Elevation Steps
+Config.STEP_Y_FIRST = 0.55   -- Y elevation for first step (studs)
+Config.STEP_Y_NEXT = 0.30    -- Y elevation for subsequent steps (studs)
+Config.MAX_EXTRA_Y = 6.0     -- Maximum extra Y elevation (studs)
+
+-- ============================================================================
+-- FORMATION CALCULATION
+-- ============================================================================
+
+--[[
+	Calculate the offset position for a carried player based on their slot index.
+	
+	The formation system creates a vertical stack of carried players behind
+	the carrier, with slight Z adjustments for the first two slots and
+	progressive Y elevation for subsequent slots.
+	
+	@param slotIndex number - The slot index (1-based)
+	@return CFrame - The offset position relative to the carrier's HumanoidRootPart
+	
+	@example
+		local offset = Config.getSlotOffset(1)
+		targetHRP.CFrame = carrierHRP.CFrame * offset
+]]
+function Config.getSlotOffset(slotIndex)
+	-- Calculate base Z position
+	local zPosition = Config.BASE_Z + (slotIndex - 1) * Config.SPACING_Z
+	
+	-- Apply slot-specific Z adjustments
+	if slotIndex == 1 then
+		zPosition = zPosition + Config.SLOT1_ADJ_Z
+	elseif slotIndex == 2 then
+		zPosition = zPosition + Config.SLOT2_ADJ_Z
+	end
+	
+	-- Calculate Y elevation based on slot index
+	local elevationIndex = math.max(0, slotIndex - 1)
+	local extraYElevation = 0
+	
+	if elevationIndex > 0 then
+		-- First slot gets base elevation, subsequent slots get progressive elevation
+		extraYElevation = Config.STEP_Y_FIRST + (elevationIndex - 1) * Config.STEP_Y_NEXT
+	end
+	
+	-- Cap maximum elevation
+	extraYElevation = math.min(extraYElevation, Config.MAX_EXTRA_Y)
+	
+	-- Calculate final Y position
+	local yPosition = Config.Y_OFFSET + extraYElevation
+	
+	-- Return CFrame offset
+	return CFrame.new(0, yPosition, zPosition)
+end
+
+-- ============================================================================
+-- VALIDATION
+-- ============================================================================
+
+--[[
+	Validate configuration values
+	Ensures all config values are within acceptable ranges
+]]
+local function validateConfig()
+	assert(Config.PENDING_TIMEOUT > 0, "PENDING_TIMEOUT must be greater than 0")
+	assert(Config.MAX_DISTANCE > 0, "MAX_DISTANCE must be greater than 0")
+	assert(Config.MAX_CARRY > 0, "MAX_CARRY must be greater than 0")
+	assert(Config.RATE_LIMIT_COUNT > 0, "RATE_LIMIT_COUNT must be greater than 0")
+	assert(Config.RATE_LIMIT_WINDOW > 0, "RATE_LIMIT_WINDOW must be greater than 0")
+	assert(Config.SPACING_Z > 0, "SPACING_Z must be greater than 0")
+end
+
+-- Run validation on load
+local success, errorMessage = pcall(validateConfig)
+if not success then
+	warn("[CarryConfig] Configuration validation failed: " .. tostring(errorMessage))
+end
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+print("========================================")
+print("✨ Carry System Config v1.0")
+print("========================================")
+print("✅ Author: ItoRenz00")
+print("✅ Max Carry: " .. Config.MAX_CARRY)
+print("✅ Max Distance: " .. Config.MAX_DISTANCE .. " studs")
+print("✅ Request Timeout: " .. Config.PENDING_TIMEOUT .. "s")
+print("========================================")
+
+return Config
