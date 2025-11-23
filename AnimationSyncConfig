@@ -1,0 +1,161 @@
+-- ============================================================================
+-- ANIMATION SYNC SYSTEM CONFIGURATION
+-- Author: ItoRenz00
+-- Version: 1.0
+-- Description: Configuration module for the Animation Sync System
+-- ============================================================================
+
+--[[
+	Animation Sync Configuration Module
+	
+	This module contains all configurable settings for the Animation Sync System,
+	including remote names, sync intervals, and animation filtering rules.
+]]
+
+local Config = {}
+
+-- ============================================================================
+-- REMOTE CONFIGURATION
+-- ============================================================================
+
+-- Name of the RemoteEvent used for initiating sync
+Config.SYNC_REMOTE_NAME = "Sync"
+
+-- Name of the RemoteEvent used for stopping sync
+Config.UNSYNC_REMOTE_NAME = "Unsync"
+
+-- ============================================================================
+-- SYNC SETTINGS
+-- ============================================================================
+
+-- Sync Method: RunService.Heartbeat
+-- The system now synchronizes every frame using Heartbeat for maximum
+-- responsiveness and minimal delay. This provides the best possible sync
+-- quality at the cost of higher performance usage.
+--
+-- Note: SYNC_INTERVAL has been removed as sync now runs every frame.
+-- Performance impact is minimal due to optimized sync logic.
+
+-- ============================================================================
+-- ANIMATION FILTERING
+-- ============================================================================
+
+--[[
+	Animation priorities to ignore during synchronization
+	
+	Animations with these priorities will not be synchronized between players.
+	Core animations are typically ignored as they are fundamental character animations.
+	
+	Available priorities:
+	- Enum.AnimationPriority.Core (0)
+	- Enum.AnimationPriority.Idle (1)
+	- Enum.AnimationPriority.Movement (2)
+	- Enum.AnimationPriority.Action (3)
+	- Enum.AnimationPriority.Action2 (4)
+	- Enum.AnimationPriority.Action3 (5)
+	- Enum.AnimationPriority.Action4 (6)
+]]
+Config.IGNORED_ANIMATION_PRIORITIES = {
+	Enum.AnimationPriority.Core,
+	-- Enum.AnimationPriority.Idle, -- Uncomment to ignore idle animations
+}
+
+--[[
+	Animation names to ignore during synchronization
+	
+	These specific animations will not be synchronized (case-insensitive matching).
+	Typically includes default Roblox locomotion animations that should remain
+	independent for each player.
+	
+	Common animations to ignore:
+	- Locomotion: walking, running, swimming
+	- States: seated, platformstanding
+	- Reactions: fallingdown, gettingup
+	- Actions: jumping, climbing
+]]
+Config.IGNORED_ANIMATION_NAMES = {
+	"running",
+	"swimming",
+	"platformstanding",
+	"seated",
+	"fallingdown",
+	"gettingup",
+	"jumping",
+	"climbing",
+	"walking",
+}
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+
+--[[
+	Check if an animation priority should be ignored
+	
+	@param priority EnumItem - The AnimationPriority to check
+	@return boolean - True if the priority should be ignored
+]]
+function Config.shouldIgnorePriority(priority)
+	for _, ignoredPriority in ipairs(Config.IGNORED_ANIMATION_PRIORITIES) do
+		if priority == ignoredPriority then
+			return true
+		end
+	end
+	return false
+end
+
+--[[
+	Check if an animation name should be ignored
+	
+	@param animationName string - The name of the animation to check
+	@return boolean - True if the animation should be ignored
+]]
+function Config.shouldIgnoreAnimation(animationName)
+	local lowerName = string.lower(animationName or "")
+	
+	for _, ignoredName in ipairs(Config.IGNORED_ANIMATION_NAMES) do
+		if string.find(lowerName, string.lower(ignoredName)) then
+			return true
+		end
+	end
+	
+	return false
+end
+
+-- ============================================================================
+-- VALIDATION
+-- ============================================================================
+
+--[[
+	Validate configuration values
+	Ensures all config values are within acceptable ranges
+]]
+local function validateConfig()
+	assert(type(Config.SYNC_REMOTE_NAME) == "string", "SYNC_REMOTE_NAME must be a string")
+	assert(type(Config.UNSYNC_REMOTE_NAME) == "string", "UNSYNC_REMOTE_NAME must be a string")
+	assert(Config.SYNC_REMOTE_NAME ~= "", "SYNC_REMOTE_NAME cannot be empty")
+	assert(Config.UNSYNC_REMOTE_NAME ~= "", "UNSYNC_REMOTE_NAME cannot be empty")
+	assert(type(Config.IGNORED_ANIMATION_PRIORITIES) == "table", "IGNORED_ANIMATION_PRIORITIES must be a table")
+	assert(type(Config.IGNORED_ANIMATION_NAMES) == "table", "IGNORED_ANIMATION_NAMES must be a table")
+end
+
+-- Run validation on load
+local success, errorMessage = pcall(validateConfig)
+if not success then
+	warn("[AnimSyncConfig] Configuration validation failed: " .. tostring(errorMessage))
+end
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+print("========================================")
+print("✨ Animation Sync Config v1.0")
+print("========================================")
+print("✅ Author: ItoRenz00")
+print("✅ Sync Method: Heartbeat (Every Frame)")
+print("✅ Ignored Priorities: " .. #Config.IGNORED_ANIMATION_PRIORITIES)
+print("✅ Ignored Animations: " .. #Config.IGNORED_ANIMATION_NAMES)
+print("========================================")
+
+return Config
