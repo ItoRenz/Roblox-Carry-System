@@ -1,0 +1,402 @@
+-- ============================================================================
+-- ANIMATION SYNCHRONIZATION SYSTEM SERVER
+-- Author: ItoRenz00
+-- Version: 1.0
+-- Description: Real-time animation synchronization between players
+-- ============================================================================
+
+--[[
+	Animation Sync System - Server Logic
+	
+	Features:
+	- Real-time animation synchronization with minimal delay
+	- Animation filtering (ignore specific priorities/names)
+	- Speed and time position synchronization
+	- Automatic cleanup on player death/disconnect
+	- Optimized sync loop for reduced jitter
+]]
+
+-- ============================================================================
+-- SERVICES
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+-- ============================================================================
+-- CONFIGURATION
+-- ============================================================================
+
+local Config = require(script.Parent:WaitForChild("AnimationSyncConfig"))
+
+-- ============================================================================
+-- REMOTE SETUP
+-- ============================================================================
+
+local SyncRemote = ReplicatedStorage:FindFirstChild(Config.SYNC_REMOTE_NAME) or Instance.new("RemoteEvent")
+SyncRemote.Name = Config.SYNC_REMOTE_NAME
+SyncRemote.Parent = ReplicatedStorage
+
+local UnsyncRemote = ReplicatedStorage:FindFirstChild(Config.UNSYNC_REMOTE_NAME) or Instance.new("RemoteEvent")
+UnsyncRemote.Name = Config.UNSYNC_REMOTE_NAME
+UnsyncRemote.Parent = ReplicatedStorage
+
+-- ============================================================================
+-- LOGGING SYSTEM
+-- ============================================================================
+
+local Logger = {}
+
+function Logger.info(message, context)
+	print(string.format("[INFO] %s - %s", context or "AnimSync", message))
+end
+
+function Logger.warn(message, context)
+	warn(string.format("[WARN] %s - %s", context or "AnimSync", message))
+end
+
+function Logger.error(message, context)
+	warn(string.format("[ERROR] %s - %s", context or "AnimSync", message))
+end
+
+-- ============================================================================
+-- STATE MANAGEMENT
+-- ============================================================================
+
+local State = {
+	-- Track synced animations per player
+	-- [playerId] = { [animationId] = AnimationTrack }
+	syncedAnimations = {},
+	
+	-- Track who is syncing with whom
+	-- [playerId] = targetPlayerId
+	syncingPlayers = {},
+	
+	-- Active sync connections
+	-- [playerId] = RBXScriptConnection
+	syncConnections = {},
+	
+	-- Death listeners for cleanup
+	-- [playerId] = { [targetId] = RBXScriptConnection }
+	deathListeners = {},
+}
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+
+local function getCharacterParts(player)
+	local character = player.Character
+	if not character then
+		return nil, nil, nil
+	end
+	
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return nil, nil, nil
+	end
+	
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		return nil, nil, nil
+	end
+	
+	return character, humanoid, animator
+end
+
+local function shouldSyncAnimation(track)
+	-- Check priority
+	if Config.shouldIgnorePriority(track.Priority) then
+		return false
+	end
+	
+	-- Check animation name
+	local animationName = track.Animation and track.Animation.Name or ""
+	if Config.shouldIgnoreAnimation(animationName) then
+		return false
+	end
+	
+	return true
+end
+
+-- ============================================================================
+-- CLEANUP FUNCTIONS
+-- ============================================================================
+
+local function cleanupDeathListeners(playerId)
+	local listeners = State.deathListeners[playerId]
+	if listeners then
+		for _, connection in pairs(listeners) do
+			if connection and connection.Connected then
+				connection:Disconnect()
+			end
+		end
+		State.deathListeners[playerId] = nil
+	end
+end
+
+local function cleanupSyncedAnimations(playerId)
+	local syncedTracks = State.syncedAnimations[playerId]
+	if syncedTracks then
+		for _, track in pairs(syncedTracks) do
+			if track and track.IsPlaying then
+				track:Stop(0)
+			end
+			if track then
+				track:Destroy()
+			end
+		end
+		State.syncedAnimations[playerId] = nil
+	end
+end
+
+local function stopSyncing(player)
+	local playerId = player.UserId
+	
+	-- Disconnect sync connection
+	local connection = State.syncConnections[playerId]
+	if connection and connection.Connected then
+		connection:Disconnect()
+	end
+	State.syncConnections[playerId] = nil
+	
+	-- Clear syncing status
+	State.syncingPlayers[playerId] = nil
+	
+	-- Clean up death listeners
+	cleanupDeathListeners(playerId)
+	
+	-- Clean up synced animations
+	cleanupSyncedAnimations(playerId)
+	
+	Logger.info("Stopped syncing for player: " .. player.Name, "StopSync")
+end
+
+-- ============================================================================
+-- SYNCHRONIZATION LOGIC
+-- ============================================================================
+
+local function syncAnimationStep(player, targetPlayer)
+	local playerId = player.UserId
+	local targetId = targetPlayer.UserId
+	
+	-- Verify still syncing this target
+	if State.syncingPlayers[playerId] ~= targetId then
+		return false
+	end
+	
+	-- Get character components
+	local playerChar, playerHum, playerAnimator = getCharacterParts(player)
+	local targetChar, targetHum, targetAnimator = getCharacterParts(targetPlayer)
+	
+	if not (playerChar and playerAnimator and targetChar and targetAnimator) then
+		return false
+	end
+	
+	-- Initialize synced animations table if needed
+	State.syncedAnimations[playerId] = State.syncedAnimations[playerId] or {}
+	local syncedTracks = State.syncedAnimations[playerId]
+	local newSyncedTracks = {}
+	
+	-- Get target's playing animations
+	local targetTracks = targetAnimator:GetPlayingAnimationTracks()
+	
+	for _, targetTrack in ipairs(targetTracks) do
+		if shouldSyncAnimation(targetTrack) then
+			local animId = targetTrack.Animation.AnimationId
+			local syncedTrack = syncedTracks[animId]
+			
+			if syncedTrack and syncedTrack.IsPlaying then
+				-- Update existing track
+				-- Use direct assignment for minimal delay
+				syncedTrack.TimePosition = targetTrack.TimePosition
+				
+				-- Only adjust speed if it changed (to reduce jitter)
+				if math.abs(syncedTrack.Speed - targetTrack.Speed) > 0.01 then
+					syncedTrack:AdjustSpeed(targetTrack.Speed)
+				end
+				
+				newSyncedTracks[animId] = syncedTrack
+			else
+				-- Create new synced track
+				local success, newTrack = pcall(function()
+					return playerAnimator:LoadAnimation(targetTrack.Animation)
+				end)
+				
+				if success and newTrack then
+					-- Set priority to Action to override most animations
+					newTrack.Priority = Enum.AnimationPriority.Action
+					
+					-- Play with initial state matching target
+					newTrack:Play(0, 1, targetTrack.Speed)
+					newTrack.TimePosition = targetTrack.TimePosition
+					
+					newSyncedTracks[animId] = newTrack
+					
+					-- Cleanup on stop
+					newTrack.Stopped:Connect(function()
+						if State.syncedAnimations[playerId] then
+							State.syncedAnimations[playerId][animId] = nil
+						end
+					end)
+				end
+			end
+		end
+	end
+	
+	-- Stop tracks that are no longer playing on target
+	for animId, existingTrack in pairs(syncedTracks) do
+		if not newSyncedTracks[animId] then
+			if existingTrack and existingTrack.IsPlaying then
+				existingTrack:Stop(0.1)
+			end
+		end
+	end
+	
+	-- Update synced tracks table
+	State.syncedAnimations[playerId] = newSyncedTracks
+	
+	return true
+end
+
+local function startSyncing(player, targetPlayer)
+	local playerId = player.UserId
+	local targetId = targetPlayer.UserId
+	
+	-- Stop any existing sync
+	if State.syncConnections[playerId] then
+		stopSyncing(player)
+	end
+	
+	-- Mark as syncing
+	State.syncingPlayers[playerId] = targetId
+	State.syncedAnimations[playerId] = {}
+	
+	-- Use Heartbeat for maximum frequency and minimal delay
+	local connection = RunService.Heartbeat:Connect(function()
+		local success = syncAnimationStep(player, targetPlayer)
+		if not success then
+			-- Stop syncing if sync step fails
+			stopSyncing(player)
+		end
+	end)
+	
+	State.syncConnections[playerId] = connection
+	
+	-- Set up death listeners
+	State.deathListeners[playerId] = State.deathListeners[playerId] or {}
+	
+	local function setupDeathListener(character)
+		local humanoid = character:WaitForChild("Humanoid", 5)
+		if not humanoid then
+			return
+		end
+		
+		local deathConnection = humanoid.Died:Connect(function()
+			if State.syncingPlayers[playerId] == targetId then
+				stopSyncing(player)
+				Logger.info(
+					"Target " .. targetPlayer.Name .. " died, stopped syncing for " .. player.Name,
+					"DeathStop"
+				)
+			end
+		end)
+		
+		State.deathListeners[playerId][targetId] = deathConnection
+	end
+	
+	-- Connect to current character
+	if targetPlayer.Character then
+		setupDeathListener(targetPlayer.Character)
+	end
+	
+	-- Connect to future characters
+	local characterAddedConnection = targetPlayer.CharacterAdded:Connect(setupDeathListener)
+	State.deathListeners[playerId]["CharacterAdded_" .. targetId] = characterAddedConnection
+	
+	Logger.info(
+		"Started syncing " .. player.Name .. " with " .. targetPlayer.Name,
+		"StartSync"
+	)
+end
+
+-- ============================================================================
+-- REMOTE EVENT HANDLERS
+-- ============================================================================
+
+SyncRemote.OnServerEvent:Connect(function(player, targetPlayer)
+	-- Validate target player
+	if not targetPlayer or not targetPlayer:IsA("Player") then
+		Logger.warn(player.Name .. " sent invalid target player", "Validation")
+		return
+	end
+	
+	-- Prevent self-sync
+	if targetPlayer == player then
+		Logger.warn(player.Name .. " tried to sync with themselves", "Validation")
+		return
+	end
+	
+	-- Verify target player exists
+	if not Players:FindFirstChild(targetPlayer.Name) then
+		Logger.warn(player.Name .. " tried to sync with non-existent player", "Validation")
+		return
+	end
+	
+	-- Start syncing
+	startSyncing(player, targetPlayer)
+end)
+
+UnsyncRemote.OnServerEvent:Connect(function(player)
+	stopSyncing(player)
+end)
+
+-- ============================================================================
+-- PLAYER EVENT HANDLERS
+-- ============================================================================
+
+Players.PlayerAdded:Connect(function(player)
+	-- Chat command support
+	player.Chatted:Connect(function(message)
+		local lowerMessage = string.lower(message)
+		
+		if lowerMessage == "/unsync" then
+			stopSyncing(player)
+		end
+	end)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	-- Clean up everything when player leaves
+	local playerId = player.UserId
+	
+	-- Stop syncing
+	if State.syncingPlayers[playerId] then
+		stopSyncing(player)
+	end
+	
+	-- Additional cleanup (in case stopSyncing didn't catch everything)
+	if State.syncConnections[playerId] then
+		local connection = State.syncConnections[playerId]
+		if connection and connection.Connected then
+			connection:Disconnect()
+		end
+		State.syncConnections[playerId] = nil
+	end
+	
+	cleanupDeathListeners(playerId)
+	cleanupSyncedAnimations(playerId)
+end)
+
+-- ============================================================================
+-- INITIALIZATION
+-- ============================================================================
+
+print("========================================")
+print("✨ Animation Sync System v1.0")
+print("========================================")
+print("✅ Author: ItoRenz00")
+print("✅ Sync Method: Heartbeat (Max Frequency)")
+print("✅ Status: Ready")
+print("========================================")
